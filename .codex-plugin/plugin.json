@@ -1,6 +1,6 @@
 {
   "name": "git-daily-weekly-report",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "根据指定 Git 仓库的提交记录生成个人中文日报或周报的 Codex 插件。",
   "author": {
     "name": "ChthollyFan",
@@ -25,7 +25,8 @@
     "developerName": "ChthollyFan",
     "category": "Productivity",
     "capabilities": [
-      "Read"
+      "Read",
+      "Write"
     ],
     "websiteURL": "https://github.com/ChthollyFan/git-daily-weekly-report"
   }
