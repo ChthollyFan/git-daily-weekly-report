@@ -10,23 +10,23 @@ dsh（DeepSeek Harness）与 Codex 都有官方插件通道，两条通道装的
 
 ### 用 dsh 插件安装
 
-包在 `package.json` 里声明了 `dsh.bundle`，可以直接走 dsh 自己的插件安装命令：
+包在 `package.json` 里声明了 `dsh.bundle`，可以直接走 dsh 自己的插件安装命令（包名带 `@chtholly-fan/` scope，技能名本身仍是 `git-daily-weekly-report`）：
 
 ```bash
-dsh plugin --profile web add git-daily-weekly-report
+dsh plugin --profile web add @chtholly-fan/git-daily-weekly-report
 ```
 
 dsh 会把包装进该 profile 的 `node_modules`，并登记到 `dsh.profile.bundles`；profile 下次启动时，包内的 `index.js` 会把 `skills/git-daily-weekly-report` 植入 `$DSH_HOME/skills`（所有 profile 共享的用户级 skill 根），所以 web 与 desktop 装一次即可共用。
 
-- 来源不限于 registry，GitHub 与本地 tarball 同样可以：`dsh plugin --profile web add ./git-daily-weekly-report-<版本>.tgz`
+- 来源不限于 registry，GitHub 与本地 tarball 同样可以：`dsh plugin --profile web add ./chtholly-fan-git-daily-weekly-report-<版本>.tgz`
 - desktop profile 由桌面应用独占管理，`dsh plugin --profile desktop add ...` 只在桌面版自带的 dsh 下放行，且应用运行时会撞上 profile 的文件锁；建议先完全退出应用，或改用应用内的插件市场安装。
 - 如果 `$DSH_HOME/skills/git-daily-weekly-report` 已经存在、又不带本插件的版本戳，插件会跳过并在日志里说明，不会覆盖你现有的目录。
 
 更新与卸载；应用内插件市场的更新按钮同理，装完要重启应用让插件重新植入：
 
 ```bash
-dsh plugin --profile web update git-daily-weekly-report
-dsh plugin --profile web remove git-daily-weekly-report
+dsh plugin --profile web update @chtholly-fan/git-daily-weekly-report
+dsh plugin --profile web remove @chtholly-fan/git-daily-weekly-report
 ```
 
 ### 用 Codex 插件安装

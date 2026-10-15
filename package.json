@@ -1,5 +1,5 @@
 {
-  "name": "git-daily-weekly-report",
+  "name": "@chtholly-fan/git-daily-weekly-report",
   "version": "1.0.0",
   "description": "根据指定 Git 仓库的提交记录生成个人中文日报或周报的 Agent Skill（Codex / dsh 双端可用）",
   "keywords": [

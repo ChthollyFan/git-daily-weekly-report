@@ -11,4 +11,4 @@
 # 兼容性检查拒载。
 - insert:
     - id: git-daily-weekly-report
-      name: 'git-daily-weekly-report'
+      name: '@chtholly-fan/git-daily-weekly-report'

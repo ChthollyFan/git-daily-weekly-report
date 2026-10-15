@@ -4,11 +4,12 @@
 #   GitHub → Settings → Secrets and variables → Actions → New repository secret
 #   名称：NPM_TOKEN
 #   值　：.npmrc 里 //registry.npmjs.org/:_authToken= 之后那串（npm_ 开头）
-# token 需具备发布权限（Granular Access Token 选择 Read and write packages）。
-# 本包没有 scope，不涉及 scope 白名单。token 有有效期，过期后 CI 会以
-# 401/403 失败，届时在 npm 网站重新生成并替换 secret 即可。
-# 若改回 Trusted Publishing（OIDC），需先在 npm 包设置页登记本仓库：
-#   https://www.npmjs.com/package/git-daily-weekly-report/access
+# token 需具备发布权限（Granular Access Token 选择 Read and write packages），
+# 且包范围必须覆盖 @chtholly-fan：权限被限定在别的 scope 时，发布只会得到
+# 403 You may not perform that action with these credentials。
+# token 有有效期，过期后 CI 会以 401/403 失败，届时在 npm 网站重新生成并替换
+# secret 即可。若改回 Trusted Publishing（OIDC），需先在 npm 包设置页登记本仓库：
+#   https://www.npmjs.com/package/@chtholly-fan/git-daily-weekly-report/access
 name: publish
 
 on:
@@ -49,9 +50,9 @@ jobs:
             echo "版本 $ver 已存在，跳过发布"
           fi
 
-      # 无 scope 的包默认就是公开包，无需 --access public
+      # scoped 包默认是私有包，必须显式 --access public 才能公开分发
       - name: 发布到 npm
         if: env.SKIP_PUBLISH != '1'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish
+        run: npm publish --access public
