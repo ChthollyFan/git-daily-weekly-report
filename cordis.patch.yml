@@ -1,0 +1,14 @@
+# dsh bundle patch 层：只插入本包的 host 插件行。
+#
+# 为什么不在这里直接把技能目录挂给 skill-filesystem：bundle 的 patch 是静态
+# YAML，而包的真实安装路径取决于它被装在哪个 profile 的 node_modules 下，
+# 静态文件算不出绝对路径。改由这个插件在 profile 启动时自己定位包内目录，
+# 再把 skills/git-daily-weekly-report 植入 $DSH_HOME/skills（dsh 默认扫描的
+# 用户级 skill 根），因此 web 与 desktop 装一次即可共用同一份技能。
+#
+# name 必须是 npm 上安装后的包名：loader 从 profile 的 node_modules 解析它。
+# 该包不能声明 @deepseek-ai/dsh* 的 peerDependencies，否则会被宿主的
+# 兼容性检查拒载。
+- insert:
+    - id: git-daily-weekly-report
+      name: 'git-daily-weekly-report'

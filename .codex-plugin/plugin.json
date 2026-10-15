@@ -1,0 +1,32 @@
+{
+  "name": "git-daily-weekly-report",
+  "version": "1.0.0",
+  "description": "根据指定 Git 仓库的提交记录生成个人中文日报或周报的 Codex 插件。",
+  "author": {
+    "name": "ChthollyFan",
+    "url": "https://github.com/ChthollyFan"
+  },
+  "homepage": "https://github.com/ChthollyFan/git-daily-weekly-report",
+  "repository": "https://github.com/ChthollyFan/git-daily-weekly-report",
+  "keywords": [
+    "codex",
+    "skill",
+    "git",
+    "daily",
+    "weekly",
+    "report",
+    "git-daily-weekly-report"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Git Daily Weekly Report",
+    "shortDescription": "根据 Git 提交生成中文日报或周报",
+    "longDescription": "读取指定 Git 仓库在指定日期范围内的提交记录与工作区改动，按个人风格整理成可直接使用的“今日工作总结”或“本周工作总结”，每条以动词开头、使用中文序号、只陈述实际完成的工作。",
+    "developerName": "ChthollyFan",
+    "category": "Productivity",
+    "capabilities": [
+      "Read"
+    ],
+    "websiteURL": "https://github.com/ChthollyFan/git-daily-weekly-report"
+  }
+}

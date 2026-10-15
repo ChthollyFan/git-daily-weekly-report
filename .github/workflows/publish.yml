@@ -1,0 +1,57 @@
+# 推送 v* tag 后自动发布到 npm registry。
+#
+# 认证使用 npm Access Token（bypass 2FA），从仓库 secret 读入：
+#   GitHub → Settings → Secrets and variables → Actions → New repository secret
+#   名称：NPM_TOKEN
+#   值　：.npmrc 里 //registry.npmjs.org/:_authToken= 之后那串（npm_ 开头）
+# token 需具备发布权限（Granular Access Token 选择 Read and write packages）。
+# 本包没有 scope，不涉及 scope 白名单。token 有有效期，过期后 CI 会以
+# 401/403 失败，届时在 npm 网站重新生成并替换 secret 即可。
+# 若改回 Trusted Publishing（OIDC），需先在 npm 包设置页登记本仓库：
+#   https://www.npmjs.com/package/git-daily-weekly-report/access
+name: publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      # tag 必须与 package.json 的版本一致，避免打错 tag 发出错误版本
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(node -p "require('./package.json').version")"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag v$tag 与 package.json 的 $pkg 不一致"
+            exit 1
+          fi
+
+      # 该版本已发布过就跳过，这样重跑 CI 不会因 E403 失败
+      - name: 判断该版本是否已发布
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          ver="$(node -p "require('./package.json').version")"
+          if npm view "$name@$ver" version >/dev/null 2>&1; then
+            echo "SKIP_PUBLISH=1" >> "$GITHUB_ENV"
+            echo "版本 $ver 已存在，跳过发布"
+          fi
+
+      # 无 scope 的包默认就是公开包，无需 --access public
+      - name: 发布到 npm
+        if: env.SKIP_PUBLISH != '1'
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
