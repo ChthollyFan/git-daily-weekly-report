@@ -1,0 +1,20 @@
+{
+  "name": "git-daily-weekly-report",
+  "interface": {
+    "displayName": "Git Daily Weekly Report"
+  },
+  "plugins": [
+    {
+      "name": "git-daily-weekly-report",
+      "source": {
+        "source": "local",
+        "path": "."
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
