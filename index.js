@@ -1,9 +1,15 @@
-// git-daily-weekly-report —— dsh bundle 的技能植入插件。
+// git-daily-weekly-report —— dsh bundle 插件。
 //
-// dsh 按 `<root>/<name>/SKILL.md` 发现技能，其中用户级根 `$DSH_HOME/skills`
-// 被所有 profile 共享。本插件作为 bundle 的一层，在 profile 启动时把包内
-// `skills/git-daily-weekly-report` 复制到该根下，于是 `dsh plugin add` 装一次，
-// web、desktop 以及之后新建的 profile 都能看到这个技能。
+// 两件事：
+// 1. 技能植入：dsh 按 `<root>/<name>/SKILL.md` 发现技能，其中用户级根
+//    `$DSH_HOME/skills` 被所有 profile 共享。本插件作为 bundle 的一层，在
+//    profile 启动时把包内 `skills/git-daily-weekly-report` 复制到该根下，于是
+//    `dsh plugin add` 装一次，web、desktop 以及之后新建的 profile 都能看到它。
+// 2. 报告总结设置：dsh web/desktop 端在设置页多一个「报告总结」导航项，用户
+//    改的输出格式 / 写作规则 / 风格规则 / 样例库 / 兜底策略 / 额外要求会渲染成
+//    一段文本，在技能被调用的那一刻插进技能正文最前（见 dsh/report-summary.js）。
+//    注入靠运行时技能注册（rank 250）遮蔽文件系统 provider（user-dsh，rank 400），
+//    磁盘上的 SKILL.md 与 references/ 保持原样，Codex 端完全不受影响。
 //
 // 用“植入 + 版本戳”而不是在 patch 里直接引用包内目录：patch 是静态 YAML，
 // 而包的实际安装路径随 profile 变化，只有 apply() 运行时才能确定。
@@ -14,6 +20,19 @@ import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import {
+  CONFIG_FILENAME,
+  composeSkillContent,
+  createDefaultConfig,
+  hasAnyValue,
+  normalizeConfig,
+  parseFrontmatter,
+  readConfig,
+  readSkillDefaults,
+  renderInjectionSection,
+  writeConfig,
+} from './dsh/report-summary.js'
 
 /** 技能标识：必须与 SKILL.md 的 frontmatter name 以及目录名一致 */
 const SKILL_NAME = 'git-daily-weekly-report'
@@ -26,6 +45,12 @@ const PACKAGE_DIR = dirname(fileURLToPath(import.meta.url))
 
 /** 随包分发的技能源目录 */
 const SOURCE_DIR = join(PACKAGE_DIR, 'skills', SKILL_NAME)
+
+/** 设置面板自建 HTTP 路由的前缀，客户端侧必须与此一致 */
+const API_PREFIX = '/git-daily-weekly-report/api'
+
+/** 请求体上限，够放全部文本字段，同时挡住误发的大包 */
+const MAX_BODY_CHARS = 60000
 
 /** cordis 插件名，显示在 loader 日志里 */
 export const name = 'git-daily-weekly-report-plant'
@@ -42,6 +67,17 @@ function resolveSkillRoot(explicit) {
     ? process.env.DSH_HOME.trim()
     : join(homedir(), '.dsh')
   return join(resolve(envHome), 'skills')
+}
+
+/**
+ * @brief 计算「报告总结」配置文件路径
+ * @param explicit 显式指定的 skill 根目录，可为空
+ * @return 配置文件绝对路径
+ * @note 落在 dsh 主目录下而不是 skills/ 里：skills/ 是技能发现根，塞非技能目录会污染扫描
+ */
+function resolveConfigPath(explicit) {
+  const home = dirname(resolveSkillRoot(explicit))
+  return join(home, SKILL_NAME, CONFIG_FILENAME)
 }
 
 /**
@@ -126,17 +162,333 @@ export function plantSkill(options = {}) {
 }
 
 /**
- * @brief cordis 插件入口：profile 启动时植入技能
- * @note 不需要 cordis 上下文：本插件只按 $DSH_HOME 约定写文件，不注册任何服务。
- *       所有异常都在这里吞掉——插件不能让宿主的 profile 启动失败。
+ * @brief 组装给设置面板的当前状态
+ * @param state 插件运行期状态
+ * @return 可直接 JSON 序列化的快照
+ * @note 技能默认值每次现读，不缓存：技能升级后面板展示的默认值自动跟随
  */
-export function apply() {
+function buildSnapshot(state) {
+  const { config, warnings } = readConfig(state.configPath)
+  let defaults = null
+  let injectable = false
+  let injectionChars = 0
   try {
-    const result = plantSkill()
-    const detail = result.reason
-      ?? (result.action === 'updated' ? `${result.from} -> ${result.to}` : result.version ?? '')
-    console.log(`[git-daily-weekly-report] ${result.action}${detail ? `：${detail}` : ''}`)
+    const read = readSkillDefaults(state.skillDir)
+    defaults = read.defaults
+    const injection = renderInjectionSection(config)
+    injectable = injection !== ''
+    injectionChars = injection.length
+  } catch (error) {
+    warnings.push(`读取技能默认值失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  return {
+    configPath: state.configPath,
+    skillDir: state.skillDir,
+    planted: state.planted?.action ?? null,
+    skillRegistered: state.registered === true,
+    injected: injectable,
+    injectionChars,
+    config,
+    defaults,
+    warnings,
+  }
+}
+
+/**
+ * @brief 用当前配置重新注册运行时技能
+ * @param state 插件运行期状态
+ * @return 是否注册成功
+ * @note 必须先注销再注册：同层同名的 runtime 条目是 first-wins，重复注册只会拿到
+ *       一个空 disposer 并记一条 warning，第二次改配置就悄无声息地不生效了
+ */
+function refreshRuntimeSkill(state) {
+  const skills = state.skills
+  if (skills === null || typeof skills.register !== 'function') return false
+
+  if (state.disposeSkill !== null) {
+    try {
+      state.disposeSkill()
+    } catch (error) {
+      console.error('[git-daily-weekly-report] 注销旧的运行时技能失败：', error)
+    }
+    state.disposeSkill = null
+    state.registered = false
+  }
+
+  try {
+    const rawSkill = readFileSync(join(state.skillDir, 'SKILL.md'), 'utf8')
+    const { description } = parseFrontmatter(rawSkill)
+    const { config } = readConfig(state.configPath)
+    const injected = hasAnyValue(config)
+    const content = composeSkillContent(injected ? renderInjectionSection(config) : '', rawSkill)
+
+    const dispose = skills.register({
+      name: SKILL_NAME,
+      // description 影响模型的路由判断，保持与磁盘 frontmatter 一致，不开放配置
+      description: description === '' ? '根据 Git 提交记录生成中文日报或周报' : description,
+      source: 'runtime',
+      // 真实目录：执行步骤要读 references/ 与跑 scripts/，不能让模型拿到虚拟路径
+      resourceBase: { kind: 'directory', path: state.skillDir },
+      path: join(state.skillDir, 'SKILL.md'),
+      content,
+    })
+
+    state.disposeSkill = typeof dispose === 'function' ? dispose : null
+    state.registered = true
+    state.injected = injected
+    return true
+  } catch (error) {
+    console.error('[git-daily-weekly-report] 注册运行时技能失败，回退到磁盘默认技能：', error)
+    state.registered = false
+    state.injected = false
+    return false
+  }
+}
+
+/**
+ * @brief 校验运行时注册确实生效
+ * @param state 插件运行期状态
+ * @note 遮蔽依赖 rank 语义（runtime 250 < user-dsh 400），这不是公开承诺；
+ *       一旦取回的 source 不是 runtime，说明 dsh 改了裁决规则，立刻在日志里点明
+ */
+async function verifyRuntimeSkill(state) {
+  const skills = state.skills
+  if (skills === null || typeof skills.get !== 'function') return
+  try {
+    const loaded = await skills.get(SKILL_NAME)
+    if (loaded !== undefined && loaded.source !== 'runtime') {
+      console.error(`[git-daily-weekly-report] 运行时技能未生效：取回的 source 是 ${loaded.source}，报告总结设置可能不起作用`)
+    }
+  } catch (error) {
+    console.error('[git-daily-weekly-report] 校验运行时技能失败：', error)
+  }
+}
+
+/**
+ * @brief 判断主机名是否是回环地址
+ * @param host 主机名或 IP
+ * @return 是回环时返回 true
+ */
+function isLoopbackName(host) {
+  const name = String(host).trim().toLowerCase().replace(/^\[|\]$/g, '')
+  return name === 'localhost' || name === '127.0.0.1' || name === '::1' || name === '0:0:0:0:0:0:0:1'
+}
+
+/**
+ * @brief 处理一个 HTTP 请求：读体 → 分发 → 回包
+ * @param state 插件运行期状态
+ * @param req Node 请求对象
+ * @param res Node 响应对象
+ */
+function handleRequest(state, req, res) {
+  const jsonHeaders = {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  }
+  const send = (status, payload) => {
+    res.writeHead(status, jsonHeaders)
+    res.end(JSON.stringify(payload))
+  }
+
+  // 只在绑定为回环时才校验 Host；绑定 0.0.0.0 属于有意对外发布，强制回环会 403 掉合法客户端
+  if (state.guardHost === true) {
+    const hostHeader = typeof req.headers.host === 'string' ? req.headers.host : ''
+    const hostName = hostHeader.replace(/:\d+$/, '')
+    if (hostHeader !== '' && !isLoopbackName(hostName)) {
+      send(403, { ok: false, saved: false, message: '仅允许回环地址访问', snapshot: null })
+      return
+    }
+  }
+
+  let body = ''
+  let overflow = false
+  req.setEncoding('utf8')
+  req.on('data', (chunk) => {
+    if (overflow) return
+    body += chunk
+    if (body.length > MAX_BODY_CHARS) overflow = true
+  })
+  req.on('error', () => {
+    send(400, { ok: false, saved: false, message: '读取请求体失败', snapshot: null })
+  })
+  req.on('end', () => {
+    if (overflow) {
+      send(413, { ok: false, saved: false, message: `请求体超过 ${MAX_BODY_CHARS} 字符上限`, snapshot: null })
+      return
+    }
+
+    void (async () => {
+      try {
+        const payload = body === '' ? {} : JSON.parse(body)
+        const method = typeof payload?.method === 'string' ? payload.method : ''
+        const args = payload?.args === undefined ? null : payload.args
+
+        if (state.snapshot === null) {
+          send(503, { ok: false, saved: false, message: '技能服务尚未就绪，请稍后重试', snapshot: null })
+          return
+        }
+
+        if (method === 'snapshot') {
+          send(200, { ok: true, saved: false, message: '', snapshot: state.snapshot() })
+          return
+        }
+
+        if (method === 'save') {
+          const { config, warnings } = normalizeConfig(args?.config)
+          writeConfig(state.configPath, config)
+          refreshRuntimeSkill(state)
+          const message = warnings.length === 0
+            ? '已保存并生效'
+            : `已保存，但有字段被忽略：${warnings.join('；')}`
+          send(200, { ok: true, saved: true, message, snapshot: state.snapshot() })
+          return
+        }
+
+        if (method === 'reset') {
+          const config = createDefaultConfig()
+          writeConfig(state.configPath, config)
+          refreshRuntimeSkill(state)
+          send(200, { ok: true, saved: true, message: '已恢复全部默认', snapshot: state.snapshot() })
+          return
+        }
+
+        send(400, {
+          ok: false,
+          saved: false,
+          message: `未知方法：${method || '(空)'}`,
+          snapshot: state.snapshot(),
+        })
+      } catch (error) {
+        send(400, {
+          ok: false,
+          saved: false,
+          message: error instanceof Error ? error.message : String(error),
+          snapshot: state.snapshot === null ? null : state.snapshot(),
+        })
+      }
+    })()
+  })
+}
+
+/**
+ * @brief 注册设置面板用来读写配置的 HTTP 路由
+ * @param ctx cordis 上下文
+ * @param state 插件运行期状态
+ * @note 用非阻塞子 fiber：headless / tui 这类没有 webServer 的 profile 不能因此
+ *       卡住整行，否则技能注册也会跟着一起丢掉
+ */
+function setupHttpRoute(ctx, state) {
+  if (typeof ctx.inject !== 'function') return
+  try {
+    ctx.inject(['webServer'], (scope) => {
+      const webServer = scope.webServer
+      if (webServer === undefined || typeof webServer.register !== 'function') {
+        console.error('[git-daily-weekly-report] webServer 不可用，设置面板的读写接口未注册')
+        return
+      }
+
+      const boundHost = typeof webServer.host === 'string' ? webServer.host.trim().toLowerCase() : ''
+      // 绑定为 0.0.0.0 或具体地址属于有意对外发布，此时不启用回环白名单
+      state.guardHost = boundHost === '' || isLoopbackName(boundHost)
+
+      let routeDispose = null
+      try {
+        routeDispose = webServer.register({
+          kind: 'prefix',
+          path: API_PREFIX,
+          handler: (req, res) => handleRequest(state, req, res),
+        })
+      } catch (error) {
+        console.error('[git-daily-weekly-report] 路由注册失败：', error)
+        routeDispose = null
+      }
+
+      scope.effect(() => () => {
+        if (routeDispose !== null) {
+          const dispose = routeDispose
+          routeDispose = null
+          try {
+            dispose()
+          } catch (error) {
+            console.error('[git-daily-weekly-report] 路由注销失败：', error)
+          }
+        }
+      })
+    })
+  } catch (error) {
+    console.error('[git-daily-weekly-report] 初始化 HTTP 路由失败：', error)
+  }
+}
+
+/**
+ * @brief cordis 插件入口：植入技能，并在 dsh 端接管「报告总结」设置
+ * @param ctx cordis 上下文。为 undefined 时退化为只做技能植入（旧行为）
+ * @note 所有异常都在这里吞掉——插件不能让宿主的 profile 启动失败
+ */
+export function apply(ctx) {
+  // 第一步永远是植入，失败也只记日志：这一步与设置功能互不依赖
+  let planted = null
+  try {
+    planted = plantSkill()
+    const detail = planted.reason
+      ?? (planted.action === 'updated' ? `${planted.from} -> ${planted.to}` : planted.version ?? '')
+    console.log(`[git-daily-weekly-report] ${planted.action}${detail ? `：${detail}` : ''}`)
   } catch (error) {
     console.log(`[git-daily-weekly-report] 植入技能失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+
+  // 没有 cordis 上下文就到此为止：保持 1.0.2 及以前“只植入”的行为
+  if (ctx === null || typeof ctx !== 'object') return
+
+  const state = {
+    configPath: resolveConfigPath(),
+    skillDir: join(resolveSkillRoot(), SKILL_NAME),
+    planted,
+    skills: null,
+    disposeSkill: null,
+    registered: false,
+    injected: false,
+    guardHost: false,
+    snapshot: null,
+  }
+
+  try {
+    if (typeof ctx.inject === 'function') {
+      // 等技能服务就绪再注册：服务不存在时不阻塞，只是不启用注入
+      ctx.inject(['skills'], (scope) => {
+        const skills = scope.skills ?? (typeof scope.get === 'function' ? scope.get('skills') : undefined)
+        if (skills === undefined || skills === null || typeof skills.register !== 'function') {
+          console.error('[git-daily-weekly-report] 技能服务不可用，报告总结设置不会生效')
+          return
+        }
+
+        state.skills = skills
+        refreshRuntimeSkill(state)
+        state.snapshot = () => buildSnapshot(state)
+        void verifyRuntimeSkill(state)
+
+        scope.effect(() => () => {
+          if (state.disposeSkill !== null) {
+            const dispose = state.disposeSkill
+            state.disposeSkill = null
+            state.registered = false
+            try {
+              dispose()
+            } catch (error) {
+              console.error('[git-daily-weekly-report] 插件卸载时注销技能失败：', error)
+            }
+          }
+        })
+      })
+    }
+  } catch (error) {
+    console.error('[git-daily-weekly-report] 初始化运行时技能失败：', error)
+  }
+
+  try {
+    setupHttpRoute(ctx, state)
+  } catch (error) {
+    console.error('[git-daily-weekly-report] 初始化设置接口失败：', error)
   }
 }

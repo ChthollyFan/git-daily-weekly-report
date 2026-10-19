@@ -1,6 +1,6 @@
 {
   "name": "@chtholly-fan/git-daily-weekly-report",
-  "version": "1.0.2",
+  "version": "1.1.2",
   "description": "根据指定 Git 仓库的提交记录生成个人中文日报或周报的 Agent Skill（Codex / dsh 双端可用）",
   "keywords": [
     "agent-skill",
@@ -13,14 +13,29 @@
   ],
   "type": "module",
   "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./dsh/client.js",
+    "./report-summary": "./dsh/report-summary.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
   "files": [
     "skills",
+    "dsh",
     "index.js",
     "cordis.patch.yml"
   ],
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
     }
   },
   "engines": {

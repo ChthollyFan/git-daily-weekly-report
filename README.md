@@ -2,7 +2,7 @@
 
 根据指定 Git 仓库在指定日期范围内的提交记录，生成可直接使用的个人中文日报或周报。
 
-这个 skill 读取提交说明与文件变更，必要时补看 `git show --stat`，把同一主题的多笔提交合并成一条，最后按个人风格输出“今日工作总结”或“本周工作总结”：每条以动词开头、使用中文序号、只陈述实际完成的工作，不写汇报人、时间、计划等字段。没有提交时回退到工作区未提交改动，再回退到项目可见信息；都不足时如实说明，不编造成果。
+这个 skill 读取提交说明与文件变更，必要时补看 `git show --stat`，把同一主题的多笔提交合并成一条，最后按个人风格输出“今日工作总结”或“本周工作总结”：每条以动词开头、使用中文序号、只陈述实际完成的工作，不写汇报人、时间、计划等字段。没有提交时回退到工作区未提交改动，再回退到项目可见信息；都不足时如实说明，不编造成果。在 dsh 端，这些风格参数还能在设置页的「报告总结」里调整，不必改动技能文件。
 
 ## 安装
 
@@ -78,12 +78,32 @@ python skills/git-daily-weekly-report/scripts/fetch_git_commits.py --repo <repo>
 
 返回结构包含 `ok`、`repo`、`type`、`ref`、`start`、`end`、`commits`（每笔含 `hash`、`subject`、`files` 等）与 `worktree`（未提交改动）。
 
+## 报告总结设置（仅 dsh web / desktop）
+
+dsh 端装好后，设置页会多一个「报告总结」导航项，用来在不改动技能文件的前提下调整输出。留空的字段沿用技能里的默认规则，填了才覆盖。
+
+| 分组 | 可配置项 |
+|------|----------|
+| 输出格式 | 日报标题、周报标题、序号格式、序号是否跨条连续、条与条之间是否空一行 |
+| 写作规则 | 写作规则文本、日报与周报的条数上下限、是否强制动词开头 |
+| 风格规则 | 替换 `report-style.md` 的风格规则正文 |
+| 样例库 | 替换默认的样例文本 |
+| 无提交时的兜底 | 替换兜底策略正文 |
+| 额外提示词要求 | 纯追加的要求，不覆盖任何现有规则 |
+
+设置保存在 `$DSH_HOME/git-daily-weekly-report/report-summary.json`。技能文件本身不会被改写：注入发生在技能被加载的那一刻，且只在 dsh 端生效——Codex 端仍使用 `skills/git-daily-weekly-report` 里的默认内容。面板上展示的默认值是从技能文件现读的，所以技能升级后默认值会跟着变。
+
+把某一项清空并保存，等于回到技能默认；「恢复全部默认」会一次性清空所有覆盖项。
+
 ## 仓库内容
 
 ```text
-package.json                      # npm 包元数据：dsh.bundle 指向 patch
+package.json                      # npm 包元数据：dsh.bundle 指向 patch，dsh.client 指向设置面板
 cordis.patch.yml                  # dsh bundle 的 patch 层，插入本包的 host 插件行
-index.js                          # 该插件：把随包技能植入 $DSH_HOME/skills
+index.js                          # 该插件：植入技能，并接管 dsh 端「报告总结」设置
+dsh/
+├── client.js                     # 设置页面板（浏览器模块格式，无需构建步骤）
+└── report-summary.js             # 配置模型、技能默认值读取与注入渲染
 .codex-plugin/
 └── plugin.json                   # Codex 插件清单，skills 指向 ./skills/
 .agents/
