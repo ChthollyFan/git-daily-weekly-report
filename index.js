@@ -16,10 +16,26 @@
 // “目标没有我们的版本戳就拒绝触碰”的约定来自 @ziduup/dsh-programming-mode，
 // 用来保护用户手写的同名技能目录，以及仓库内安装脚本建立的目录链接。
 
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import {
+  CONFIG_FILENAME as PUSH_CONFIG_FILENAME,
+  buildScheduleInstruction,
+  buildTaskPrompt,
+  createDefaultConfig as createDefaultPushConfig,
+  describeWeekdays,
+  hasIncompleteChannel,
+  listEnabledChannels,
+  normalizeConfig as normalizePushConfig,
+  readConfig as readPushConfig,
+  resolveConfigDir as resolvePushConfigDir,
+  writeConfig as writePushConfig,
+} from './dsh/push-config.js'
+
+import { TEST_REPORT_TEXT, resolveScriptPath, runSendReport } from './dsh/push-send.js'
 
 import {
   CONFIG_FILENAME,
@@ -78,6 +94,17 @@ function resolveSkillRoot(explicit) {
 function resolveConfigPath(explicit) {
   const home = dirname(resolveSkillRoot(explicit))
   return join(home, SKILL_NAME, CONFIG_FILENAME)
+}
+
+/**
+ * @brief 计算「自动推送」配置文件路径
+ * @return 配置文件绝对路径
+ * @note 与「报告总结」不同，这份配置必须落在 ~/.git-daily-weekly-report 下：它唯一的
+ *       消费方是 send_report.py（定时任务里由 agent 直接调用），两侧路径不一致就会
+ *       出现「面板里改了、脚本读不到」的情况
+ */
+function resolvePushConfigPath() {
+  return join(resolvePushConfigDir(homedir()), PUSH_CONFIG_FILENAME)
 }
 
 /**
@@ -191,6 +218,38 @@ function buildSnapshot(state) {
     injectionChars,
     config,
     defaults,
+    warnings,
+  }
+}
+
+/**
+ * @brief 组装给「自动推送」设置分区用的快照
+ * @param state 插件运行期状态
+ * @return 可直接 JSON 序列化的快照
+ * @note 派生字段（可用通道、待补全提醒、定时指令）都在服务端算好：前端只做展示，
+ *       避免两处各写一套判断逻辑导致面板说「可发」而脚本实际跳过
+ */
+function buildPushSnapshot(state) {
+  const { config, warnings, existed } = readPushConfig(state.pushConfigPath)
+  const scriptPath = resolveScriptPath(state.skillDir)
+  const channels = listEnabledChannels(config)
+
+  return {
+    configPath: state.pushConfigPath,
+    skillDir: state.skillDir,
+    scriptPath,
+    // 脚本随技能一起植入，缺失说明技能目录不完整，先提示而不是等定时到点才报错
+    scriptExists: existsSync(scriptPath),
+    existed,
+    config,
+    channels,
+    incomplete: hasIncompleteChannel(config),
+    weekdayText: describeWeekdays(config.schedule.weekly.weekdays),
+    taskPrompts: {
+      daily: buildTaskPrompt(config, 'daily'),
+      weekly: buildTaskPrompt(config, 'weekly'),
+    },
+    scheduleInstruction: buildScheduleInstruction(config),
     warnings,
   }
 }
@@ -324,8 +383,18 @@ function handleRequest(state, req, res) {
         const method = typeof payload?.method === 'string' ? payload.method : ''
         const args = payload?.args === undefined ? null : payload.args
 
-        if (state.snapshot === null) {
+        // 自动推送分区独立于运行时技能：技能未能注册时，用户仍然可以先把推送配好，
+        // 所以先分辨方法归属，再各自检查对应的快照是否就绪
+        const isPushMethod = method === 'push-snapshot' || method === 'push-save'
+          || method === 'push-reset' || method === 'push-test'
+
+        if (!isPushMethod && state.snapshot === null) {
           send(503, { ok: false, saved: false, message: '技能服务尚未就绪，请稍后重试', snapshot: null })
+          return
+        }
+
+        if (isPushMethod && state.pushSnapshot === null) {
+          send(503, { ok: false, saved: false, message: '自动推送服务尚未就绪，请稍后重试', snapshot: null })
           return
         }
 
@@ -350,6 +419,95 @@ function handleRequest(state, req, res) {
           writeConfig(state.configPath, config)
           refreshRuntimeSkill(state)
           send(200, { ok: true, saved: true, message: '已恢复全部默认', snapshot: state.snapshot() })
+          return
+        }
+
+        if (method === 'push-snapshot') {
+          send(200, { ok: true, saved: false, message: '', snapshot: state.pushSnapshot() })
+          return
+        }
+
+        if (method === 'push-save') {
+          const { config, warnings } = normalizePushConfig(args?.config)
+          writePushConfig(state.pushConfigPath, config)
+          // 半填的通道不会报错，只会在定时到点那天静默失败，所以保存时就把隐患说清楚
+          const notes = [...warnings]
+          if (hasIncompleteChannel(config)) notes.push('有通道已开启但关键字段为空，到点推送会失败')
+          if (listEnabledChannels(config).length === 0) notes.push('当前没有任何可用通道，推送会被全部跳过')
+          const message = notes.length === 0 ? '已保存自动推送配置' : `已保存，但需注意：${notes.join('；')}`
+          // 同时把 notes 单独回给前端：客户端据此决定用成功色还是待确认色
+          send(200, { ok: true, saved: true, message, warnings: notes, snapshot: state.pushSnapshot() })
+          return
+        }
+
+        if (method === 'push-reset') {
+          const config = createDefaultPushConfig()
+          writePushConfig(state.pushConfigPath, config)
+          send(200, {
+            ok: true,
+            saved: true,
+            message: '已恢复自动推送的默认配置',
+            warnings: [],
+            snapshot: state.pushSnapshot(),
+          })
+          return
+        }
+
+        if (method === 'push-test') {
+          // 用草稿配置测试：写一份临时配置文件、跑完即删，这样改了字段不必先落盘就能试
+          const { config } = normalizePushConfig(args?.config)
+          const type = args?.type === 'weekly' ? 'weekly' : 'daily'
+          const channel = ['wecom', 'webhook', 'smtp'].includes(args?.channel) ? String(args.channel) : ''
+          const testConfigPath = `${state.pushConfigPath}.test`
+
+          let outcome
+          try {
+            writePushConfig(testConfigPath, config)
+            const scriptArgs = [
+              '--type', type,
+              '--text', TEST_REPORT_TEXT,
+              '--config', testConfigPath,
+              '--no-archive',
+            ]
+            if (channel !== '') scriptArgs.push('--channel', channel)
+            outcome = await runSendReport({
+              pythonPath: config.runtime.pythonPath,
+              scriptPath: resolveScriptPath(state.skillDir),
+              args: scriptArgs,
+            })
+          } catch (error) {
+            outcome = {
+              ok: false,
+              exitCode: null,
+              stdout: '',
+              stderr: '',
+              result: null,
+              reason: `测试发送未完成：${error instanceof Error ? error.message : String(error)}`,
+            }
+          } finally {
+            try {
+              unlinkSync(testConfigPath)
+            } catch {
+              // 临时文件没写成功时忽略
+            }
+          }
+
+          send(200, {
+            ok: outcome.ok,
+            saved: false,
+            message: outcome.ok ? '测试发送成功，去目标应用里确认一下' : `测试发送失败：${outcome.reason}`,
+            snapshot: state.pushSnapshot(),
+            test: {
+              ok: outcome.ok,
+              exitCode: outcome.exitCode,
+              reason: outcome.reason,
+              stdout: outcome.stdout,
+              stderr: outcome.stderr,
+              result: outcome.result,
+              channel: channel === '' ? '全部启用通道' : channel,
+              type,
+            },
+          })
           return
         }
 
@@ -443,6 +601,7 @@ export function apply(ctx) {
 
   const state = {
     configPath: resolveConfigPath(),
+    pushConfigPath: resolvePushConfigPath(),
     skillDir: join(resolveSkillRoot(), SKILL_NAME),
     planted,
     skills: null,
@@ -451,7 +610,12 @@ export function apply(ctx) {
     injected: false,
     guardHost: false,
     snapshot: null,
+    pushSnapshot: null,
   }
+
+  // 自动推送只看配置文件与随包脚本，不依赖 skills 服务，所以在等注入之前就挂上快照：
+  // 技能注册失败或 profile 没有 skill 服务时，「自动推送」分区仍然可读可写
+  state.pushSnapshot = () => buildPushSnapshot(state)
 
   try {
     if (typeof ctx.inject === 'function') {
