@@ -34,6 +34,61 @@ window.__ModuleLoader__.load({
       { value: 7, label: '周日' },
     ]
 
+    /** 与 WEEKDAY_LABELS 同序的纯文本：拼字符串时必须用这个，写成数组对象会显示成 [object Object] */
+    const WEEKDAY_NAMES = WEEKDAY_LABELS.map((day) => day.label)
+
+    /**
+     * 把 ISO 星期数组压成中文：连续三天以上合并成区间，全周直接写「每天」
+     * @note 规则与 host 侧 dsh/push-config.js 的 describeWeekdays 保持一致，
+     *       客户端拿不到那个模块，只能各写一份
+     */
+    const weekdayText = (list) => {
+      const days = (Array.isArray(list) ? list : [])
+        .filter((day) => typeof day === 'number' && day >= 1 && day <= 7)
+        .sort((left, right) => left - right)
+      if (days.length === 0) return '（未设置）'
+      if (days.length === 7) return '每天'
+
+      const groups = []
+      let start = 0
+      for (let index = 1; index <= days.length; index += 1) {
+        const atEnd = index === days.length
+        if (!atEnd && days[index] === days[index - 1] + 1) continue
+        const span = index - start
+        if (span >= 3) {
+          groups.push(`${WEEKDAY_NAMES[days[start] - 1]}至${WEEKDAY_NAMES[days[index - 1] - 1]}`)
+        } else {
+          for (let cursor = start; cursor < index; cursor += 1) {
+            groups.push(WEEKDAY_NAMES[days[cursor] - 1])
+          }
+        }
+        start = index
+      }
+      return groups.join('、')
+    }
+
+    /**
+     * 时区下拉的候选：只列中国常用时区，省得手敲 IANA 名打错
+     * @note push-config.js 侧仍按 IANA 名校验，手改配置文件写别的时区照样可用；
+     *       界面只在「值不在列表里」时补一项显示出来，不会覆盖原值
+     */
+    const TIME_ZONE_CHOICES = [
+      { value: 'Asia/Shanghai', label: 'Asia/Shanghai（北京，UTC+8）' },
+      { value: 'Asia/Hong_Kong', label: 'Asia/Hong_Kong（香港，UTC+8）' },
+      { value: 'Asia/Macau', label: 'Asia/Macau（澳门，UTC+8）' },
+      { value: 'Asia/Taipei', label: 'Asia/Taipei（台北，UTC+8）' },
+      { value: 'Asia/Urumqi', label: 'Asia/Urumqi（乌鲁木齐，UTC+6）' },
+    ]
+
+    /** 把当前值折进候选：列表外的值追加一项，避免下拉缺项时显示空白 */
+    const timeZoneOptions = (current) => {
+      const text = typeof current === 'string' ? current.trim() : ''
+      if (text === '' || TIME_ZONE_CHOICES.some((item) => item.value === text)) {
+        return TIME_ZONE_CHOICES
+      }
+      return [...TIME_ZONE_CHOICES, { value: text, label: `${text}（当前配置，不在常用列表）` }]
+    }
+
     /** 样式全部走 .gdr- 前缀，避免与其它插件的规则相互覆盖 */
     const CSS = `
 .gdr-root { display:flex; flex-direction:column; gap:14px; padding:6px 2px 56px; max-width:880px;
@@ -99,6 +154,35 @@ window.__ModuleLoader__.load({
   border-color:var(--dsw-alias-state-success-primary,#128a3a); }
 .gdr-card-body { display:flex; flex-direction:column; gap:10px; padding:0 15px 14px; }
 .gdr-card-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding-top:2px; }
+/* 定时任务列表与创建失败时的三按钮弹层 */
+.gdr-task { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:12px; padding:8px 10px;
+  border-radius:8px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1)); }
+.gdr-task-main { flex:1; min-width:180px; }
+.gdr-task-sub { font-size:11px; color:var(--dsw-alias-label-secondary,#8a9099); word-break:break-all; }
+.gdr-modal-mask { position:fixed; inset:0; z-index:20; display:flex; align-items:center; justify-content:center;
+  padding:20px; background:rgba(0,0,0,.36); }
+.gdr-modal { width:min(620px,100%); max-height:80vh; overflow:auto; display:flex; flex-direction:column; gap:10px;
+  padding:16px; border-radius:12px; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.12));
+  /* 弹层必须不透明：兜底值同时给出深色主题会用的底色，避免变量缺失时白底浅字 */
+  color:var(--dsw-alias-label-primary,#1f2329);
+  background:var(--dsw-alias-bg-layer-1,#fff); }
+/* 合并后的单页外壳：顶栏（标题 + 版本号 + 更新）与页内分区切换条 */
+.gdr-topbar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.gdr-topbar .gdr-h { margin:0; }
+.gdr-version { font-family:ui-monospace,Consolas,monospace; font-size:11px; padding:1px 8px; border-radius:999px;
+  border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1));
+  color:var(--dsw-alias-label-secondary,#8a9099); }
+.gdr-update { margin-left:auto; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+.gdr-tabs { display:flex; gap:4px; padding:3px; border-radius:10px;
+  border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1));
+  background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.04)); align-self:flex-start; }
+.gdr-tab { border:0; background:none; color:inherit; font-family:inherit; font-size:12px;
+  padding:5px 14px; border-radius:8px; cursor:pointer; }
+.gdr-tab:hover { background:var(--dsw-alias-bg-layer-1,rgba(255,255,255,.6)); }
+.gdr-tab-on { background:var(--dsw-alias-bg-layer-1,#fff); font-weight:600;
+  box-shadow:0 1px 2px rgba(0,0,0,.08); }
+/* 子页嵌在外壳里时不再自带外边距与最大宽度，否则会出现双层留白 */
+.gdr-embedded { display:flex; flex-direction:column; gap:14px; }
 `
 
     /**
@@ -431,10 +515,141 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * @brief 客户端侧的版本比较，与 host 半同口径：只看前三段数字
+     * @param candidate 待比较版本
+     * @param base 基准版本
+     * @return candidate 更大时返回 true
+     */
+    function isNewer(candidate, base) {
+      const parse = (text) => String(text ?? '').split('.').slice(0, 3).map((part) => {
+        const value = Number.parseInt(part, 10)
+        return Number.isFinite(value) ? value : 0
+      })
+      const left = parse(candidate)
+      const right = parse(base)
+      for (let index = 0; index < 3; index += 1) {
+        if (left[index] !== right[index]) return left[index] > right[index]
+      }
+      return false
+    }
+
+    /**
+     * @brief 「报告总结」设置页外壳：版本号、更新按钮与两个分区的切换
+     * @note 报告设置与自动推送合并成一个导航项，靠页内切换条换视图。两个子页始终挂载、
+     *       只切换显示，所以切走再切回来时没保存的草稿还在
+     */
+    function SettingsShell() {
+      const [tab, setTab] = React.useState('summary')
+      const [info, setInfo] = React.useState(null)
+      const [checking, setChecking] = React.useState(false)
+      const [installing, setInstalling] = React.useState(false)
+      const [updateNote, setUpdateNote] = React.useState('')
+
+      React.useEffect(() => {
+        let alive = true
+        void (async () => {
+          try {
+            const data = await callApi('plugin-info', null)
+            if (alive) setInfo(data.info ?? null)
+          } catch {
+            // 版本号取不到不影响两个分区自身的读写，静默跳过
+          }
+        })()
+        return () => {
+          alive = false
+        }
+      }, [])
+
+      const current = info !== null && typeof info.version === 'string' ? info.version : ''
+      const latest = info !== null && typeof info.latest === 'string' ? info.latest : ''
+      const hasUpdate = current !== '' && latest !== '' && isNewer(latest, current)
+      // link 形态下代码就是工作区那份，安装会把链接换成实体包，所以只提示不安装
+      const isLinkMode = info !== null && info.installMode === 'link'
+
+      const check = async () => {
+        setChecking(true)
+        setUpdateNote('')
+        try {
+          const data = await callApi('check-update', null)
+          if (data.info) setInfo(data.info)
+          setUpdateNote(data.message ?? '')
+        } catch (error) {
+          setUpdateNote(`检查更新失败：${error.message}`)
+        } finally {
+          setChecking(false)
+        }
+      }
+
+      const install = async () => {
+        if (latest === '' || info === null) return
+        const confirmed = window.confirm(
+          `将从 npm 安装 ${info.name}@${latest}，安装完成后需要重启 dsh 才会生效。继续？`)
+        if (!confirmed) return
+        setInstalling(true)
+        setUpdateNote('')
+        try {
+          const data = await callApi('install-update', { version: latest }, { allowFail: true })
+          if (data.info) setInfo(data.info)
+          setUpdateNote(data.message ?? '')
+        } catch (error) {
+          setUpdateNote(`安装失败：${error.message}`)
+        } finally {
+          setInstalling(false)
+        }
+      }
+
+      let updateControl = null
+      if (hasUpdate && !isLinkMode) {
+        updateControl = h('button', {
+          className: 'gdr-btn gdr-btn-primary',
+          disabled: installing,
+          onClick: () => void install(),
+        }, installing ? '安装中…' : `安装更新 v${latest}`)
+      } else {
+        updateControl = h('button', {
+          className: 'gdr-btn',
+          disabled: checking || info === null,
+          onClick: () => void check(),
+        }, checking ? '检查中…' : '检查更新')
+      }
+
+      return h('div', { className: 'gdr-root' },
+        h('div', { className: 'gdr-topbar' },
+          h('h3', { className: 'gdr-h' }, '报告总结'),
+          h('span', { className: 'gdr-version' }, current === '' ? '读取中…' : `v${current}`),
+          h('div', { className: 'gdr-update' }, updateControl)),
+
+        // link 形态先说明清楚，否则用户点了半天检查更新也不知道为什么不给装
+        isLinkMode
+          ? h('div', { className: 'gdr-meta' },
+            `当前为开发链接形态，代码指向 ${info.linkTarget}；需要更新时在该目录执行 git pull。`)
+          : null,
+
+        updateNote === '' ? null : h('div', { className: 'gdr-meta' }, updateNote),
+
+        h('div', { className: 'gdr-tabs' },
+          h('button', {
+            className: 'gdr-tab' + (tab === 'summary' ? ' gdr-tab-on' : ''),
+            onClick: () => setTab('summary'),
+          }, '报告设置'),
+          h('button', {
+            className: 'gdr-tab' + (tab === 'push' ? ' gdr-tab-on' : ''),
+            onClick: () => setTab('push'),
+          }, '自动推送')),
+
+        h('div', { style: { display: tab === 'summary' ? undefined : 'none' } },
+          h(Panel, { embedded: true })),
+        h('div', { style: { display: tab === 'push' ? undefined : 'none' } },
+          h(PushPanel, { embedded: true })))
+    }
+
+    /**
      * @brief 设置页主体
      * @note 初始加载失败时保留错误提示，表单不渲染，避免用户对着空表单改名
      */
-    function Panel() {
+    function Panel(props) {
+      // 嵌在合并页里时由外壳提供标题与版本号，自己不再重复渲染页头
+      const embedded = props !== null && props !== undefined && props.embedded === true
       const [snapshot, setSnapshot] = React.useState(null)
       const [draft, setDraft] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
@@ -465,8 +680,8 @@ window.__ModuleLoader__.load({
       }, [load])
 
       if (draft === null || snapshot === null) {
-        return h('div', { className: 'gdr-root' },
-          h('header', null,
+        return h('div', { className: embedded ? 'gdr-embedded' : 'gdr-root' },
+          embedded ? null : h('header', null,
             h('h3', { className: 'gdr-h' }, '报告总结'),
             h('p', { className: 'gdr-sub' }, '这里的设置只在 dsh 端生效，Codex 端仍使用技能目录里的默认内容。')),
           h('div', { className: 'gdr-status' + (status.kind === 'err' ? ' gdr-status-err' : '') }, status.text))
@@ -506,8 +721,8 @@ window.__ModuleLoader__.load({
       const defaults = snapshot.defaults ?? { output: {}, writing: {}, style: {}, fallback: {} }
       const orDefault = (value, fallback) => value ?? fallback ?? ''
 
-      return h('div', { className: 'gdr-root' },
-        h('header', null,
+      return h('div', { className: embedded ? 'gdr-embedded' : 'gdr-root' },
+        embedded ? null : h('header', null,
           h('h3', { className: 'gdr-h' }, '报告总结'),
           h('p', { className: 'gdr-sub' },
             '留空的字段表示沿用技能里的默认规则；填了才会覆盖。设置只在 dsh 端生效，Codex 端不受影响。')),
@@ -654,15 +869,22 @@ window.__ModuleLoader__.load({
     /** 通道的中文名，测试结果与摘要行都用这套叫法，避免前后不一 */
     const CHANNEL_LABELS = { wecom: '企业微信', webhook: '自定义 Webhook', smtp: '邮件' }
 
-    function PushPanel() {
+    function PushPanel(props) {
+      // 与「报告设置」一样：嵌入合并页时不重复渲染页头
+      const embedded = props !== null && props !== undefined && props.embedded === true
       const [snapshot, setSnapshot] = React.useState(null)
       const [draft, setDraft] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
       const [status, setStatus] = React.useState({ kind: 'idle', text: '正在读取自动推送配置…' })
-      const [copyTip, setCopyTip] = React.useState('')
       // 三个通道各自是否展开；null 表示还没从配置里推断过
       const [expanded, setExpanded] = React.useState(null)
       const [testingChannel, setTestingChannel] = React.useState('')
+      // 已创建的日报/周报定时任务，由 schedule-list 拉取
+      const [tasks, setTasks] = React.useState([])
+      // 正在创建/取消的任务标识：type 或任务 id，非空时按钮禁用
+      const [taskBusy, setTaskBusy] = React.useState('')
+      // 创建失败时把降级指令摆进弹层，由用户决定粘贴、重试还是放弃
+      const [failPrompt, setFailPrompt] = React.useState(null)
 
       /** 载入快照并把配置深拷成草稿，后续所有编辑都只动草稿 */
       const adopt = React.useCallback((data) => {
@@ -680,22 +902,54 @@ window.__ModuleLoader__.load({
         })
       }, [])
 
+      /** 拉取已创建的日报/周报定时任务；失败不影响配置本身 */
+      const refreshTasks = React.useCallback(async () => {
+        try {
+          const data = await callApi('schedule-list', null, { allowFail: true })
+          setTasks(Array.isArray(data.tasks) ? data.tasks : [])
+          // 调度服务没起来时列表必然为空，这里把原因说清楚，免得看起来像「建了却不见了」；
+          // 但旧版宿主不认这个方法，那种情况只在点「创建」时才提示，不在这里刷红条
+          const message = typeof data.message === 'string' ? data.message : ''
+          if (data.ok !== true && message !== '' && !message.includes('未知方法')) {
+            setStatus({ kind: 'err', text: message })
+          }
+        } catch {
+          setTasks([])
+        }
+      }, [])
+
+      /** 只刷新快照里的定时段，不动草稿：避免把用户没保存的编辑冲掉 */
+      const refreshScheduleStatus = React.useCallback(async () => {
+        try {
+          const data = await callApi('push-snapshot', null, { allowFail: true })
+          const schedule = data.snapshot === null || data.snapshot === undefined
+            ? undefined
+            : data.snapshot.schedule
+          if (schedule !== undefined) {
+            setSnapshot((prev) => (prev === null ? prev : { ...prev, schedule }))
+          }
+        } catch {
+          // 刷新失败不影响任务列表，承载会话那行保持原样
+        }
+      }, [])
+
       const load = React.useCallback(async () => {
         setStatus({ kind: 'idle', text: '正在读取自动推送配置…' })
         try {
           adopt(await callApi('push-snapshot', null))
+          void refreshTasks()
         } catch (error) {
           setStatus({ kind: 'err', text: `读取失败：${error.message}` })
         }
-      }, [adopt])
+      }, [adopt, refreshTasks])
 
       React.useEffect(() => {
         void load()
       }, [load])
 
       if (draft === null || snapshot === null) {
-        return h('div', { className: 'gdr-root' },
-          h('header', null,
+        return h('div', { className: embedded ? 'gdr-embedded' : 'gdr-root' },
+          embedded ? null : h('header', null,
             h('h3', { className: 'gdr-h' }, '自动推送'),
             h('p', { className: 'gdr-sub' }, '定时生成日报/周报后推送到企业微信、自定义 webhook 或邮件。')),
           h('div', { className: 'gdr-status' + (status.kind === 'err' ? ' gdr-status-err' : '') }, status.text))
@@ -796,26 +1050,116 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const copyInstruction = async () => {
-        const text = snapshot.scheduleInstruction ?? ''
-        if (text === '') {
+      /** 复制创建指令；传 text 时复制指定文本（失败弹层里的那一份） */
+      const copyInstruction = async (text) => {
+        const content = typeof text === 'string' && text !== '' ? text : (snapshot.scheduleInstruction ?? '')
+        if (content === '') {
           setCopyTip('先生成定时配置并保存，再复制指令')
           return
         }
         try {
-          await navigator.clipboard.writeText(text)
+          await navigator.clipboard.writeText(content)
           setCopyTip('已复制，粘贴给任意 dsh 会话即可创建定时任务')
         } catch {
           setCopyTip('复制失败，请手动选中下面的指令复制')
         }
       }
 
+      /** 任务行的时间摘要：按 kind 拼「每天/每周几 + 时区 + 下次时间」 */
+      const describeTask = (task) => {
+        const parts = []
+        if (task.kind === 'daily') {
+          parts.push(`每天 ${task.time} ${task.timeZone}`.trim())
+        } else if (task.kind === 'weekly') {
+          const days = weekdayText(task.weekdays)
+          // 全勾时 days 已经是「每天」，前面再加「每」会变成「每每天」
+          const prefix = days === '每天' ? '每天' : `每${days}`
+          parts.push(`${prefix} ${task.time} ${task.timeZone}`.trim())
+        } else if (task.kind === 'cron') {
+          parts.push(`cron ${task.expression}`)
+        } else if (task.kind !== '') {
+          parts.push(task.kind)
+        }
+        if (task.scheduledAt !== '') parts.push(`下次 ${task.scheduledAt}`)
+        return parts.filter((item) => item !== '').join(' · ')
+      }
+
+      /**
+       * 用页面上已保存的配置直接创建定时任务
+       * @note 必须用已保存的配置：草稿未落盘时建的会是旧参数，确认框里先说清楚
+       */
+      const createTask = async (type) => {
+        const label = type === 'weekly' ? '周报' : '日报'
+        const schedule = snapshot.schedule ?? {}
+        if (schedule.canCreate !== true) {
+          // 三种原因分开说：宿主没重启时快照里根本没有 schedule 字段、bundle 没启用、
+          // 服务在但建不了承载会话。混成一句「服务不可用」会把人带偏
+          const reason = snapshot.schedule === undefined || snapshot.schedule === null
+            ? '当前宿主还没加载新版插件接口，请重启 dsh 后重试'
+            : (schedule.reason || '官方调度服务不可用；请先在插件管理页启用「自动化任务」并重启 dsh')
+          setStatus({ kind: 'err', text: reason })
+          setFailPrompt({ type, label, reason, instruction: '' })
+          return
+        }
+        const confirmed = window.confirm(
+          `将按当前已保存的配置创建${label}定时任务，确认继续？\n（刚改过时间或标题的话，要先点底部「保存」，否则建的是旧参数）`,
+        )
+        if (!confirmed) return
+
+        setTaskBusy(type)
+        setStatus({ kind: 'idle', text: `正在创建${label}定时任务…` })
+        try {
+          const data = await callApi('schedule-create', { type }, { allowFail: true })
+          setTasks(Array.isArray(data.tasks) ? data.tasks : [])
+          if (data.ok === true) {
+            setStatus({ kind: 'ok', text: data.message || `已创建${label}定时任务` })
+          } else {
+            setStatus({ kind: 'err', text: data.message || `创建${label}定时任务失败` })
+            setFailPrompt({
+              type,
+              label,
+              reason: data.reason || data.message || '',
+              instruction: data.instruction || '',
+            })
+          }
+        } catch (error) {
+          setStatus({ kind: 'err', text: `创建${label}定时任务失败：${error.message}` })
+        } finally {
+          setTaskBusy('')
+          // 承载会话可能刚被新建，把快照里的定时段换掉（不动草稿）
+          void refreshScheduleStatus()
+        }
+      }
+
+      /** 取消一条已创建的任务；dsh 侧是硬删除，连投递记录一起没 */
+      const cancelTask = async (task) => {
+        const name = task.title === '' ? task.id : task.title
+        if (!window.confirm(`取消「${name}」这条定时任务？取消后不会再自动生成。`)) return
+
+        setTaskBusy(task.id)
+        try {
+          const data = await callApi('schedule-delete', { id: task.id }, { allowFail: true })
+          setTasks(Array.isArray(data.tasks) ? data.tasks : [])
+          setStatus({
+            kind: data.ok === true ? 'ok' : 'err',
+            text: data.message || (data.ok === true ? '已取消定时任务' : '取消失败'),
+          })
+        } catch (error) {
+          setStatus({ kind: 'err', text: `取消定时任务失败：${error.message}` })
+        } finally {
+          setTaskBusy('')
+        }
+      }
+
       const wecom = draft.channels.wecom
       const webhook = draft.channels.webhook
       const smtp = draft.channels.smtp
+      // 官方调度是可选 bundle：快照里没有 schedule 段时一律按「未启用」呈现
+      const schedule = snapshot.schedule ?? {}
+      const carrierId = typeof schedule.session?.id === 'string' ? schedule.session.id : ''
 
-      return h('div', { className: 'gdr-root' },
-        h('header', null,
+      return h('div', { className: embedded ? 'gdr-embedded' : 'gdr-root' },
+        embedded ? null : h('header', null,
           h('h3', { className: 'gdr-h' }, '自动推送'),
           h('p', { className: 'gdr-sub' },
             '定时由 dsh 的调度任务触发：到点后 agent 生成正文并调用技能里的 send_report.py 发送。',
@@ -843,11 +1187,6 @@ window.__ModuleLoader__.load({
             label: '归档目录', value: draft.archiveDir,
             hint: '每次推送前把正文存一份，同日重复推送会被拦下',
             onChange: (value) => patch((config) => { config.archiveDir = value }),
-          }),
-          h(TextField, {
-            label: 'Python 解释器', value: draft.runtime.pythonPath,
-            hint: '留 python 即可；用虚拟环境时填绝对路径',
-            onChange: (value) => patch((config) => { config.runtime.pythonPath = value }),
           })),
 
         // 企业微信群机器人
@@ -1010,26 +1349,39 @@ window.__ModuleLoader__.load({
 
         // 定时
         h('section', { className: 'gdr-card' },
-          h('h4', { className: 'gdr-card-h' }, '定时'),
+          h('h4', { className: 'gdr-card-h' }, '定时任务'),
           h('p', { className: 'gdr-sub' },
-            '这里只存参数；真正的定时任务要在 dsh 里创建，创建指令由下面的按钮生成。'),
-          h(ToggleField, {
-            label: '启用日报定时', value: draft.schedule.daily.enabled,
-            onChange: (value) => patch((config) => { config.schedule.daily.enabled = value }),
-          }),
+            '点下面按钮直接创建：到点后由 dsh 调度服务把提醒投递到承载会话，',
+            'agent 再按技能步骤生成正文并调用 send_report.py 发送。',
+            '改了时间或标题要先点底部「保存」，创建时用的是已保存的参数。'),
+          h('div', { className: 'gdr-meta' },
+            h('div', null, '承载会话：',
+              carrierId === ''
+                ? '尚未创建（首次建任务时自动新建，落在「未分组」）'
+                : h('b', null, carrierId)),
+            h('div', null, '调度服务：',
+              // 旧宿主返回的快照里没有 schedule 字段，这种情况是「没重启」而不是「没启用」
+              snapshot.schedule === undefined || snapshot.schedule === null
+                ? '宿主未加载新接口（请重启 dsh）'
+                : schedule.available === true
+                  ? (schedule.canCreate === true ? '可用' : '已启用，但会话服务不可用')
+                  : '未启用（需在插件管理页启用「自动化任务」）')),
           h('div', { className: 'gdr-grid2' },
             h(TextField, {
               label: '日报时间', value: draft.schedule.daily.time,
               hint: 'HH:mm，24 小时制',
               onChange: (value) => patch((config) => { config.schedule.daily.time = value }),
             }),
-            h(TextField, {
+            h(SelectField, {
               label: '日报时区', value: draft.schedule.daily.timeZone,
+              options: timeZoneOptions(draft.schedule.daily.timeZone),
               onChange: (value) => patch((config) => { config.schedule.daily.timeZone = value }),
             })),
-          h(ToggleField, {
-            label: '启用周报定时', value: draft.schedule.weekly.enabled,
-            onChange: (value) => patch((config) => { config.schedule.weekly.enabled = value }),
+          // 日报也要能挑星期：全勾等于每天，只勾工作日就是工作日报
+          h(WeekdayField, {
+            label: '日报发送日', value: draft.schedule.daily.weekdays,
+            hint: '可多选，当前：' + snapshot.dailyWeekdayText,
+            onChange: (value) => patch((config) => { config.schedule.daily.weekdays = value }),
           }),
           h('div', { className: 'gdr-grid2' },
             h(TextField, {
@@ -1037,8 +1389,9 @@ window.__ModuleLoader__.load({
               hint: 'HH:mm，24 小时制',
               onChange: (value) => patch((config) => { config.schedule.weekly.time = value }),
             }),
-            h(TextField, {
+            h(SelectField, {
               label: '周报时区', value: draft.schedule.weekly.timeZone,
+              options: timeZoneOptions(draft.schedule.weekly.timeZone),
               onChange: (value) => patch((config) => { config.schedule.weekly.timeZone = value }),
             })),
           h(WeekdayField, {
@@ -1056,14 +1409,38 @@ window.__ModuleLoader__.load({
               label: '周报任务标题', value: draft.schedule.taskTitles.weekly,
               onChange: (value) => patch((config) => { config.schedule.taskTitles.weekly = value }),
             })),
+          h('div', { className: 'gdr-card-actions' },
+            // 两个创建按钮都是次要操作：和「保存」不同级，不用强调样式
+            h('button', {
+              className: 'gdr-btn', type: 'button',
+              disabled: busy || taskBusy !== '',
+              onClick: () => void createTask('daily'),
+            }, taskBusy === 'daily' ? '创建中…' : '创建日报定时任务'),
+            h('button', {
+              className: 'gdr-btn', type: 'button',
+              disabled: busy || taskBusy !== '',
+              onClick: () => void createTask('weekly'),
+            }, taskBusy === 'weekly' ? '创建中…' : '创建周报定时任务'),
+            h('button', {
+              className: 'gdr-btn', type: 'button', disabled: taskBusy !== '',
+              onClick: () => void refreshTasks(),
+            }, '刷新任务列表')),
           h('div', { className: 'gdr-field' },
-            h('span', { className: 'gdr-label' }, '创建指令',
-              h('em', { className: 'gdr-hint' }, '复制后粘贴给任意 dsh 会话，由它创建定时任务')),
-            h('pre', { className: 'gdr-code' }, snapshot.scheduleInstruction ?? ''),
-            h('div', { className: 'gdr-actions' },
-              h('button', { className: 'gdr-btn', type: 'button', onClick: () => void copyInstruction() },
-                '复制创建指令'),
-              copyTip === '' ? null : h('span', { className: 'gdr-hint' }, copyTip)))),
+            h('span', { className: 'gdr-label' }, '已创建的定时任务'),
+            tasks.length === 0
+              ? h('p', { className: 'gdr-hint' }, '还没有创建定时任务')
+              : h('div', { className: 'gdr-field' }, tasks.map((task) => h('div', {
+                  className: 'gdr-task', key: task.id,
+                },
+                  h('div', { className: 'gdr-task-main' },
+                    h('div', null,
+                      h('b', null, task.type === 'weekly' ? '周报' : '日报'), ' · ', task.title),
+                    h('div', { className: 'gdr-task-sub' }, describeTask(task))),
+                  h('button', {
+                    className: 'gdr-btn', type: 'button', disabled: taskBusy !== '',
+                    onClick: () => void cancelTask(task),
+                  }, taskBusy === task.id ? '取消中…' : '取消')))))),
+          // 兜底指令不再常驻页面：只有直接创建失败时，才在弹层里给出可复制的指令
 
         // 校验与状态
         h('section', { className: 'gdr-card' },
@@ -1072,6 +1449,13 @@ window.__ModuleLoader__.load({
             label: '发送前校验正文', value: draft.validation.enabled,
             hint: '检查标题、序号连续，不合格直接拒发，避免把半成品发到群里',
             onChange: (value) => patch((config) => { config.validation.enabled = value }),
+          }),
+          // 解释器只影响本页「测试此通道」的试发，定时推送由 agent 用自己的环境执行脚本；
+          // 放在校验与状态区，避免被当成定时推送的必需项
+          h(TextField, {
+            label: 'Python 解释器', value: draft.runtime.pythonPath,
+            hint: '仅用于本页「测试此通道」试发；留 python 即可，用虚拟环境时填绝对路径',
+            onChange: (value) => patch((config) => { config.runtime.pythonPath = value }),
           }),
           h('div', { className: 'gdr-meta' },
             h('div', null, '配置文件：', h('b', null, snapshot.configPath),
@@ -1093,7 +1477,41 @@ window.__ModuleLoader__.load({
           h('button', {
             className: 'gdr-btn', type: 'button', disabled: busy,
             onClick: () => void load(),
-          }, '重新载入')))
+          }, '重新载入')),
+
+        // 创建失败的降级弹层：确认（我自己粘贴）/ 重试 / 取消，三选一
+        failPrompt === null ? null : h('div', { className: 'gdr-modal-mask' },
+          h('div', { className: 'gdr-modal' },
+            h('h4', { className: 'gdr-card-h' }, `${failPrompt.label}定时任务没有创建成功`),
+            h('p', { className: 'gdr-sub' }, `原因：${failPrompt.reason === '' ? '未知' : failPrompt.reason}`),
+            h('p', { className: 'gdr-sub' },
+              '可以把下面这段指令粘贴到任意 dsh 会话里，由它代为创建同样的定时任务。'),
+            h('pre', { className: 'gdr-code' },
+              (failPrompt.instruction === '' ? (snapshot.scheduleInstruction ?? '') : failPrompt.instruction)
+                || '暂无可用指令'),
+            h('div', { className: 'gdr-actions' },
+              h('button', {
+                className: 'gdr-btn gdr-btn-primary', type: 'button',
+                onClick: () => {
+                  const text = failPrompt.instruction === ''
+                    ? (snapshot.scheduleInstruction ?? '')
+                    : failPrompt.instruction
+                  setFailPrompt(null)
+                  void copyInstruction(text)
+                },
+              }, '确认，我自己粘贴'),
+              h('button', {
+                className: 'gdr-btn', type: 'button', disabled: taskBusy !== '',
+                onClick: () => {
+                  const type = failPrompt.type
+                  setFailPrompt(null)
+                  void createTask(type)
+                },
+              }, '重试'),
+              h('button', {
+                className: 'gdr-btn', type: 'button',
+                onClick: () => setFailPrompt(null),
+              }, '取消')))))
     }
 
     /**
@@ -1127,19 +1545,9 @@ window.__ModuleLoader__.load({
           // 用普通字符串而不是函数：无 locale 服务的 shell 会直接渲染 options.label
           label: '报告总结',
         },
-        () => h(Panel, null),
-      )))
-
-      // 「自动推送」紧跟其后注册成独立导航项：它涉及外部凭证与真实网络请求，
-      // 和写作规则分开一页，误操作面更小，order 顺延一位保持相邻
-      ctx.effect(() => slots.inject('settings.section', () => slots.register(
-        {
-          name: 'settings.section',
-          id: 'report-push',
-          order: 1301,
-          label: '自动推送',
-        },
-        () => h(PushPanel, null),
+        // 「报告设置」与「自动推送」合成一页，由壳内的切换条分区：
+        // 导航项少一个，两页共用同一处版本号与更新入口
+        () => h(SettingsShell, null),
       )))
     }
 

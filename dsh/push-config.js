@@ -109,9 +109,13 @@ export function createDefaultConfig() {
       },
     },
     schedule: {
-      daily: { enabled: false, time: '18:00', timeZone: currentTimeZone() },
-      weekly: { enabled: false, weekdays: [5], time: '18:00', timeZone: currentTimeZone() },
+      // 定时任务「有没有」由是否真的创建过任务决定，这里只存参数，不再有启用开关
+      // 日报也支持挑星期：默认工作日，想要每天就把七天全勾上（调度层一律用 weekly 表达）
+      daily: { time: '18:00', timeZone: currentTimeZone(), weekdays: [1, 2, 3, 4, 5] },
+      weekly: { weekdays: [5], time: '18:00', timeZone: currentTimeZone() },
       taskTitles: { daily: '每日工作日报', weekly: '每周工作周报' },
+      // 承载定时任务的会话：官方调度只把提醒投递回创建它的会话，故会话身份必须随配置一起持久化
+      session: { id: '', cwd: '', createdAt: '' },
     },
   }
 }
@@ -512,14 +516,13 @@ function normalizeSmtp(raw, target, warnings) {
 function normalizeSchedule(raw, target, warnings) {
   const daily = raw.daily
   if (daily !== null && daily !== undefined && typeof daily === 'object') {
-    target.daily.enabled = coerceBool(daily.enabled, target.daily.enabled, '日报定时开关', warnings)
+    target.daily.weekdays = coerceWeekdays(daily.weekdays, target.daily.weekdays, '日报星期', warnings)
     target.daily.time = coerceTimeOfDay(daily.time, target.daily.time, '日报定时时间', warnings)
     target.daily.timeZone = coerceTimeZone(daily.timeZone, target.daily.timeZone, '日报时区', warnings)
   }
 
   const weekly = raw.weekly
   if (weekly !== null && weekly !== undefined && typeof weekly === 'object') {
-    target.weekly.enabled = coerceBool(weekly.enabled, target.weekly.enabled, '周报定时开关', warnings)
     target.weekly.weekdays = coerceWeekdays(weekly.weekdays, target.weekly.weekdays, '周报星期', warnings)
     target.weekly.time = coerceTimeOfDay(weekly.time, target.weekly.time, '周报定时时间', warnings)
     target.weekly.timeZone = coerceTimeZone(weekly.timeZone, target.weekly.timeZone, '周报时区', warnings)
@@ -531,6 +534,14 @@ function normalizeSchedule(raw, target, warnings) {
     const weeklyTitle = coerceText(titles.weekly, target.taskTitles.weekly, '周报任务标题', warnings)
     target.taskTitles.daily = dailyTitle === '' ? target.taskTitles.daily : dailyTitle
     target.taskTitles.weekly = weeklyTitle === '' ? target.taskTitles.weekly : weeklyTitle
+  }
+
+  // 承载会话由插件创建后写回，手工改写没有意义且容易指错，这里只做类型收窄不做语义校验
+  const session = raw.session
+  if (session !== null && session !== undefined && typeof session === 'object') {
+    target.session.id = coerceText(session.id, '', '承载会话 id', warnings)
+    target.session.cwd = coerceText(session.cwd, '', '承载会话工作目录', warnings)
+    target.session.createdAt = coerceText(session.createdAt, '', '承载会话创建时间', warnings)
   }
 }
 
@@ -566,18 +577,66 @@ export function hasIncompleteChannel(config) {
 /**
  * @brief 把 ISO 星期数组转成中文说明
  * @param weekdays 星期数组
- * @return 形如「周一、周三」的文本
+ * @return 形如「周一、周三」或「周一至周五」的文本
+ * @note 连续三天以上合并成区间：全周只写「每天」，工作日写「周一至周五」，
+ *       比逐个罗列好读；不足三天的连续段仍逐个写，避免「周一至周二」这种更长的表达
  */
 export function describeWeekdays(weekdays) {
   if (!Array.isArray(weekdays) || weekdays.length === 0) return '（未设置）'
-  return weekdays.map((day) => WEEKDAY_NAMES[day - 1] ?? String(day)).join('、')
+  const days = [...weekdays].sort((left, right) => left - right)
+  if (days.length === 7) return '每天'
+
+  const groups = []
+  let start = 0
+  for (let index = 1; index <= days.length; index += 1) {
+    const atEnd = index === days.length
+    if (!atEnd && days[index] === days[index - 1] + 1) continue
+    const span = index - start
+    if (span >= 3) {
+      groups.push(`${WEEKDAY_NAMES[days[start] - 1] ?? days[start]}至${WEEKDAY_NAMES[days[index - 1] - 1] ?? days[index - 1]}`)
+    } else {
+      for (let cursor = start; cursor < index; cursor += 1) {
+        groups.push(WEEKDAY_NAMES[days[cursor] - 1] ?? String(days[cursor]))
+      }
+    }
+    start = index
+  }
+
+  return groups.join('、')
+}
+
+/**
+ * @brief 本插件定时任务在 prompt 里的标记
+ * @note 官方 catalog 返回宿主全部任务（含用户手工建的），只能靠标记区分哪些归本插件管
+ */
+export const TASK_MARKERS = { daily: '[gdr-daily]', weekly: '[gdr-weekly]' }
+
+/**
+ * @brief 取某类报告的任务标记
+ * @param type 'daily' 或 'weekly'
+ * @return 标记文本，未知类型返回空串
+ */
+export function taskMarkerFor(type) {
+  return TASK_MARKERS[type] ?? ''
+}
+
+/**
+ * @brief 从任务的 prompt 反推它属于日报还是周报
+ * @param prompt 任务里保存的指令原文
+ * @return 'daily'、'weekly' 或空串（空串代表不是本插件创建的任务）
+ */
+export function typeFromPrompt(prompt) {
+  const text = typeof prompt === 'string' ? prompt : ''
+  if (text.includes(TASK_MARKERS.daily)) return 'daily'
+  if (text.includes(TASK_MARKERS.weekly)) return 'weekly'
+  return ''
 }
 
 /**
  * @brief 构造某类报告的定时任务指令
  * @param config 已规范化的配置
  * @param type 'daily' 或 'weekly'
- * @return 可直接粘贴给 agent 的中文指令；该类型未启用时返回空串
+ * @return 可直接粘贴给 agent 的中文指令
  * @note 指令必须自包含：定时投递只带这段文字，agent 不会知道是哪个仓库、发到哪
  */
 export function buildTaskPrompt(config, type) {
@@ -587,6 +646,7 @@ export function buildTaskPrompt(config, type) {
   const label = type === 'weekly' ? '周报' : '日报'
 
   return [
+    `${TASK_MARKERS[type] ?? ''} `,
     `运行 git-daily-weekly-report 技能，为仓库 ${repo} 生成今天的${label}，`,
     `生成后调用技能目录下的 scripts/send_report.py --type ${type} 推送（当前启用通道：${channelText}）。`,
     '推送失败时把失败原因告诉我，不要把 webhook 地址或密码回显到对话里。',
@@ -596,30 +656,35 @@ export function buildTaskPrompt(config, type) {
 /**
  * @brief 构造供设置页「复制创建指令」使用的整段说明
  * @param config 已规范化的配置
+ * @param type 可选，'daily' 或 'weekly'：指定后只输出该类型
  * @return 可直接粘贴给 agent 的多行文本
- * @note schedule_create 是 agent 作用域工具，设置页调不到，只能生成指令让 agent 代建
+ * @note 设置页默认走官方 schedule 服务直接创建；本函数只作为创建失败后的降级路径，
+ *       以及想让 agent 自己决定细节时的手工入口
+ * @note 按 type 判断而不是按启用开关：配置里已经没有开关，
+ *       是否定时完全由「有没有创建过任务」决定
  */
-export function buildScheduleInstruction(config) {
+export function buildScheduleInstruction(config, type) {
+  const wantDaily = type !== 'weekly'
+  const wantWeekly = type !== 'daily'
+
   const lines = ['读取 ~/.git-daily-weekly-report/push-config.json 的 schedule 段，用 schedule_create 创建定时任务：']
 
-  if (config.schedule.daily.enabled) {
+  if (wantDaily) {
+    const dailyDays = config.schedule.daily.weekdays
     lines.push(
-      `- 日报：kind=daily，time=${config.schedule.daily.time}，timeZone=${config.schedule.daily.timeZone}，`,
+      `- 日报：kind=weekly，weekdays=[${dailyDays.join(',')}]（${describeWeekdays(dailyDays)}），`,
+      `  time=${config.schedule.daily.time}，timeZone=${config.schedule.daily.timeZone}，`,
       `  title=${config.schedule.taskTitles.daily}，prompt=${buildTaskPrompt(config, 'daily')}`,
     )
   }
 
-  if (config.schedule.weekly.enabled) {
+  if (wantWeekly) {
     lines.push(
       `- 周报：kind=weekly，weekdays=[${config.schedule.weekly.weekdays.join(',')}]`
         + `（${describeWeekdays(config.schedule.weekly.weekdays)}），`,
       `  time=${config.schedule.weekly.time}，timeZone=${config.schedule.weekly.timeZone}，`,
       `  title=${config.schedule.taskTitles.weekly}，prompt=${buildTaskPrompt(config, 'weekly')}`,
     )
-  }
-
-  if (!config.schedule.daily.enabled && !config.schedule.weekly.enabled) {
-    return '日报与周报的定时都未启用，先在「自动推送」里勾选定时并保存，再复制创建指令。'
   }
 
   return lines.join('\n')
