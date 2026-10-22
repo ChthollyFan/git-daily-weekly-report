@@ -101,6 +101,10 @@ window.__ModuleLoader__.load({
 .gdr-field { display:flex; flex-direction:column; gap:4px; }
 .gdr-label { font-size:12px; font-weight:500; display:flex; align-items:baseline; gap:6px; flex-wrap:wrap; }
 .gdr-hint { font-style:normal; font-size:11px; font-weight:400; color:var(--dsw-alias-label-secondary,#8a9099); }
+/* 字段级格式校验：只在本字段有内容且格式不对时描红，并在框下补一行红字说明 */
+.gdr-input-invalid { border-color:var(--dsw-alias-state-error-primary,#e5484d); }
+.gdr-input-invalid:focus { outline:1px solid var(--dsw-alias-state-error-primary,#e5484d); outline-offset:0; }
+.gdr-field-err { font-style:normal; font-size:11px; color:var(--dsw-alias-state-error-primary,#c62a2f); }
 .gdr-input, .gdr-textarea, .gdr-select { width:100%; box-sizing:border-box; font-family:inherit; font-size:12px;
   color:inherit; padding:6px 9px; border-radius:8px;
   border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.18));
@@ -285,22 +289,27 @@ window.__ModuleLoader__.load({
 
     /**
      * @brief 单行/多行文本字段
+     * @param props.validate 可选的即时校验函数：返回空串表示合法，否则作为框下红字提示
      * @note placeholder 展示技能里的当前默认值，让“留空即沿用默认”可见
      */
     function TextField(props) {
       const Control = props.multiline ? 'textarea' : 'input'
+      // 受控输入：每次 patch 都会重渲染，校验结果跟着当前输入值即时刷新，不用等失焦
+      const issue = typeof props.validate === 'function' ? props.validate(props.value ?? '') : ''
       return h('label', { className: 'gdr-field' },
         h('span', { className: 'gdr-label' }, props.label,
           props.hint ? h('em', { className: 'gdr-hint' }, props.hint) : null),
         h(Control, {
-          className: props.multiline ? 'gdr-textarea' : 'gdr-input',
+          className: (props.multiline ? 'gdr-textarea' : 'gdr-input')
+            + (issue === '' ? '' : ' gdr-input-invalid'),
           // 密钥类字段用 password 遮住屏幕上的明文；它本来就以明文存在本地配置文件里
           type: props.multiline ? undefined : (props.secret ? 'password' : 'text'),
           value: props.value ?? '',
           placeholder: props.placeholder ?? '',
           spellCheck: false,
           onChange: (event) => props.onChange(event.target.value),
-        }))
+        }),
+        issue === '' ? null : h('em', { className: 'gdr-field-err' }, issue))
     }
 
     /**
@@ -381,13 +390,15 @@ window.__ModuleLoader__.load({
 
     /**
      * @brief 整数输入框，空串交给 host 回退到默认值
+     * @note type=number 的原生约束不会在输入中途拦人，越界时在框下补一行红字
      */
     function NumberField(props) {
+      const issue = rangeIssue(props.value, props.min ?? -Infinity, props.max ?? Infinity)
       return h('label', { className: 'gdr-field' },
         h('span', { className: 'gdr-label' }, props.label,
           props.hint ? h('em', { className: 'gdr-hint' }, props.hint) : null),
         h('input', {
-          className: 'gdr-input',
+          className: 'gdr-input' + (issue === '' ? '' : ' gdr-input-invalid'),
           type: 'number',
           min: props.min ?? undefined,
           max: props.max ?? undefined,
@@ -401,7 +412,8 @@ window.__ModuleLoader__.load({
             const num = Number(raw)
             props.onChange(Number.isInteger(num) ? num : null)
           },
-        }))
+        }),
+        issue === '' ? null : h('em', { className: 'gdr-field-err' }, issue))
     }
 
     /**
@@ -480,6 +492,124 @@ window.__ModuleLoader__.load({
     /** 数组 → 面板上显示的文本 */
     function joinList(list) {
       return Array.isArray(list) ? list.join('，') : ''
+    }
+
+    /**
+     * 邮箱格式：客户端比 host 侧的「含 @ 且无空白」更严一档，要求域名带点、顶级域至少两位字母。
+     * 这里只负责提示，不改保存值：是否丢弃仍由 host 的 coerceEmailArray 决定，
+     * 免得两边规则不一致时把真实可达的地址悄悄清掉。
+     */
+    const EMAIL_PATTERN = /^[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$/
+
+    /**
+     * @brief 从「显示名 <邮箱>」写法里取出邮箱本体
+     * @param text 原始文本
+     * @return 尖括号里的地址；没有尖括号时原样返回
+     * @note SMTP 的 From/To 头本身就支持带显示名的写法，此处只取地址做格式判断
+     */
+    function pickEmailAddress(text) {
+      const value = String(text ?? '').trim()
+      const match = value.match(/^[^<>]*<([^<>]+)>$/)
+      return match ? match[1].trim() : value
+    }
+
+    /**
+     * @brief 校验单个邮箱地址
+     * @param text 输入框里的原始文本
+     * @return 不合法时返回提示文案，合法或留空时返回空串
+     */
+    function emailIssue(text) {
+      const value = String(text ?? '').trim()
+      // 留空表示沿用账号本身，不算错误
+      if (value === '') return ''
+      if (EMAIL_PATTERN.test(pickEmailAddress(value))) return ''
+      return '不是合法的邮箱地址，例如 me@example.com'
+    }
+
+    /**
+     * @brief 校验逗号分隔的邮箱列表，逐项指出哪几个不合格
+     * @param text 输入框里的原始文本
+     * @return 不合法时返回提示文案，合法或留空时返回空串
+     */
+    function emailListIssue(text) {
+      const value = String(text ?? '').trim()
+      if (value === '') return ''
+      // 每项都先剥掉可选的显示名再判，避免「日报群 <a@b.co>」被当成非法项
+      const bad = splitList(value).filter((item) => !EMAIL_PATTERN.test(pickEmailAddress(item)))
+      if (bad.length === 0) return ''
+      return `${bad.length} 项不是合法邮箱：${bad.join('、')}`
+    }
+
+    /**
+     * @brief 校验 http(s) 地址
+     * @param text 地址文本
+     * @return 不合法时返回提示文案，合法或留空时返回空串
+     * @note 敲到一半也会判非法（例如刚敲完 https://），这是有意的即时反馈
+     */
+    function urlIssue(text) {
+      const value = String(text ?? '').trim()
+      if (value === '') return ''
+      if (/\s/.test(value)) return '地址里不能有空白字符'
+      let parsed
+      try {
+        parsed = new URL(value)
+      } catch {
+        return '不是合法地址，需要形如 https://example.com/hook'
+      }
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        return '只接受 http:// 或 https:// 开头的地址'
+      }
+      return ''
+    }
+
+    /**
+     * @brief 校验 SMTP 主机名或 IP
+     * @param text 服务器地址文本
+     * @return 不合法时返回提示文案，合法或留空时返回空串
+     * @note 允许 localhost、纯 IP、[::1] 这类 IPv6 字面量与带下划线的内网主机名，不要求必须带点
+     */
+    function hostIssue(text) {
+      const value = String(text ?? '').trim()
+      if (value === '') return ''
+      // 先判协议头：带 http:// 时下面「不允许斜杠」的提示会跑偏
+      if (value.includes('://')) return '不要带 http(s):// 协议头，只填主机名或 IP'
+      if (/[\s/]/.test(value)) return '只填主机名或 IP，不要带空格或路径'
+      // IPv6 字面量按 [::1] 形式放行，不参与域名规则
+      if (/^\[[0-9A-Fa-f:.]+\]$/.test(value)) return ''
+      // 允许下划线：内网自建邮件服务常用 smtp_server.corp 这类非 RFC 主机名，拦下会误伤
+      if (!/^[A-Za-z0-9._-]+$/.test(value)) {
+        return '主机名只能包含字母、数字、点号、下划线和连字符'
+      }
+      if (value.includes('..') || value.startsWith('.') || value.endsWith('.')) {
+        return '主机名的点号用法不正确'
+      }
+      return ''
+    }
+
+    /**
+     * @brief 校验 HH:mm 形式的时间
+     * @param text 时间文本
+     * @return 不合法时返回提示文案，合法或留空时返回空串
+     * @note 规则与 host 侧 coerceTimeOfDay 保持一致：24 小时制、两位小时
+     */
+    function timeIssue(text) {
+      const value = String(text ?? '').trim()
+      if (value === '') return ''
+      if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) return '需为 HH:mm 形式，例如 09:30'
+      return ''
+    }
+
+    /**
+     * @brief 校验区间整数（端口、字节数、超时秒数）
+     * @param value 输入框解析后的数字，null 表示留空沿用默认
+     * @param min 允许的最小值
+     * @param max 允许的最大值
+     * @return 不合法时返回提示文案，合法或留空时返回空串
+     */
+    function rangeIssue(value, min, max) {
+      if (value === null || value === undefined) return ''
+      if (!Number.isInteger(value) || value < min || value > max) return `需为 ${min}~${max} 的整数`
+      return ''
     }
 
     /**
@@ -980,6 +1110,51 @@ window.__ModuleLoader__.load({
         }
       }
 
+      /**
+       * @brief 汇总草稿里所有格式不合法的字段
+       * @return 形如 [{ label, issue }] 的列表，全部合法时为空数组
+       * @note 只拦「填了但不合法」的值：留空表示沿用默认或账号，交给 host 回退
+       */
+      const collectIssues = () => {
+        const channels = draft.channels
+        const found = []
+        const push = (label, issue) => {
+          if (issue !== '') found.push({ label, issue })
+        }
+        push('企业微信 Webhook 地址', urlIssue(channels.wecom.webhookUrl))
+        push('自定义 Webhook 地址', urlIssue(channels.webhook.url))
+        push('SMTP 服务器', hostIssue(channels.smtp.host))
+        push('发件人', emailIssue(channels.smtp.from))
+        push('收件人', emailListIssue(joinList(channels.smtp.to)))
+        push('抄送', emailListIssue(joinList(channels.smtp.cc)))
+        push('日报时间', timeIssue(draft.schedule.daily.time))
+        push('周报时间', timeIssue(draft.schedule.weekly.time))
+        push('SMTP 端口', rangeIssue(channels.smtp.port, 1, 65535))
+        push('企业微信单条字节上限', rangeIssue(channels.wecom.maxBytes, 500, 4096))
+        push('邮件超时秒数', rangeIssue(channels.smtp.timeoutSeconds, 1, 120))
+        push('Webhook 超时秒数', rangeIssue(channels.webhook.timeoutSeconds, 1, 120))
+        return found
+      }
+
+      /**
+       * @brief 保存前先过一遍格式校验，有问题就地拦下并列出字段
+       * @note 不拦的话 host 会把非法项静默清空，用户填的内容悄悄消失更难排查
+       */
+      const submitPush = () => {
+        const issues = collectIssues()
+        if (issues.length > 0) {
+          const lines = issues.map((item) => `${item.label}：${item.issue}`)
+          // 附带出口：确实需要保留非常规取值时（内网地址等），手工改配置文件仍可用
+          setStatus({
+            kind: 'err',
+            text: '以下字段格式不对，请先修正再保存：\n' + lines.join('\n')
+              + '\n（如确属内网特殊格式，可手工编辑配置文件绕开面板校验）',
+          })
+          return
+        }
+        void run('push-save', { config: draft })
+      }
+
       /** 切换某个通道卡片的展开状态 */
       const toggleExpanded = (channelName, open) => {
         setExpanded((prev) => ({ ...(prev ?? {}), [channelName]: open }))
@@ -1002,18 +1177,34 @@ window.__ModuleLoader__.load({
           : `已启用 · ${channels.smtp.host}:${channels.smtp.port}`
       }
 
-      /** 单个通道的就绪检查：本地先拦一道，省得白跑一次请求 */
+      /**
+       * 单个通道的就绪检查：本地先拦一道，省得白跑一次请求
+       * @note 除了「没填」，这里也复用字段格式校验：地址或邮箱明显不对时直接试发只会白等一轮
+       */
       const channelProblem = (channelName) => {
         const channels = draft.channels
-        if (channelName === 'wecom' && String(channels.wecom.webhookUrl ?? '').trim() === '') {
-          return '企业微信：请先填 Webhook 地址'
+        if (channelName === 'wecom') {
+          if (String(channels.wecom.webhookUrl ?? '').trim() === '') return '企业微信：请先填 Webhook 地址'
+          const issue = urlIssue(channels.wecom.webhookUrl)
+          if (issue !== '') return `企业微信 Webhook 地址有问题：${issue}`
         }
-        if (channelName === 'webhook' && String(channels.webhook.url ?? '').trim() === '') {
-          return '自定义 Webhook：请先填地址'
+        if (channelName === 'webhook') {
+          if (String(channels.webhook.url ?? '').trim() === '') return '自定义 Webhook：请先填地址'
+          const issue = urlIssue(channels.webhook.url)
+          if (issue !== '') return `自定义 Webhook 地址有问题：${issue}`
         }
         if (channelName === 'smtp') {
           if (String(channels.smtp.host ?? '').trim() === '') return '邮件：请先填 SMTP 服务器'
+          const hostProblem = hostIssue(channels.smtp.host)
+          if (hostProblem !== '') return `邮件的 SMTP 服务器有问题：${hostProblem}`
           if (!Array.isArray(channels.smtp.to) || channels.smtp.to.length === 0) return '邮件：请先填收件人'
+          // 发件人留空是允许的（host 会回退成账号），所以只查「填了但不合法」的情况
+          const fromProblem = emailIssue(channels.smtp.from)
+          if (fromProblem !== '') return `邮件的发件人${fromProblem}`
+          const toProblem = emailListIssue(joinList(channels.smtp.to))
+          if (toProblem !== '') return `邮件的收件人${toProblem}`
+          const ccProblem = emailListIssue(joinList(channels.smtp.cc))
+          if (ccProblem !== '') return `邮件的抄送${ccProblem}`
         }
         return ''
       }
@@ -1205,6 +1396,7 @@ window.__ModuleLoader__.load({
           }),
           h(TextField, {
             label: 'Webhook 地址', value: wecom.webhookUrl, secret: true,
+            validate: urlIssue,
             hint: '群设置 → 群机器人 → 添加后复制，key 就是全部凭证',
             placeholder: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...',
             onChange: (value) => patch((config) => { config.channels.wecom.webhookUrl = value }),
@@ -1254,6 +1446,7 @@ window.__ModuleLoader__.load({
           }),
           h(TextField, {
             label: '地址', value: webhook.url,
+            validate: urlIssue,
             placeholder: 'https://example.com/hook',
             onChange: (value) => patch((config) => { config.channels.webhook.url = value }),
           }),
@@ -1290,6 +1483,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'gdr-grid2' },
             h(TextField, {
               label: 'SMTP 服务器', value: smtp.host,
+              validate: hostIssue,
               placeholder: 'smtp.example.com',
               onChange: (value) => patch((config) => { config.channels.smtp.host = value }),
             }),
@@ -1318,17 +1512,20 @@ window.__ModuleLoader__.load({
             })),
           h(TextField, {
             label: '发件人', value: smtp.from,
+            validate: emailIssue,
             hint: '留空则用账号本身',
             placeholder: 'me@example.com',
             onChange: (value) => patch((config) => { config.channels.smtp.from = value }),
           }),
           h(TextField, {
             label: '收件人', value: joinList(smtp.to),
+            validate: emailListIssue,
             hint: '逗号分隔多个地址',
             onChange: (value) => patch((config) => { config.channels.smtp.to = splitList(value) }),
           }),
           h(TextField, {
             label: '抄送', value: joinList(smtp.cc),
+            validate: emailListIssue,
             hint: '逗号分隔，可留空',
             onChange: (value) => patch((config) => { config.channels.smtp.cc = splitList(value) }),
           }),
@@ -1369,6 +1566,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'gdr-grid2' },
             h(TextField, {
               label: '日报时间', value: draft.schedule.daily.time,
+              validate: timeIssue,
               hint: 'HH:mm，24 小时制',
               onChange: (value) => patch((config) => { config.schedule.daily.time = value }),
             }),
@@ -1386,6 +1584,7 @@ window.__ModuleLoader__.load({
           h('div', { className: 'gdr-grid2' },
             h(TextField, {
               label: '周报时间', value: draft.schedule.weekly.time,
+              validate: timeIssue,
               hint: 'HH:mm，24 小时制',
               onChange: (value) => patch((config) => { config.schedule.weekly.time = value }),
             }),
@@ -1468,7 +1667,7 @@ window.__ModuleLoader__.load({
         h('div', { className: 'gdr-actions' },
           h('button', {
             className: 'gdr-btn gdr-btn-primary', type: 'button', disabled: busy,
-            onClick: () => void run('push-save', { config: draft }),
+            onClick: () => submitPush(),
           }, busy ? '处理中…' : '保存'),
           h('button', {
             className: 'gdr-btn', type: 'button', disabled: busy,
