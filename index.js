@@ -1110,7 +1110,8 @@ function handleRequest(state, req, res) {
           // 用草稿配置测试：写一份临时配置文件、跑完即删，这样改了字段不必先落盘就能试
           const { config } = normalizePushConfig(args?.config)
           const type = args?.type === 'weekly' ? 'weekly' : 'daily'
-          const channel = ['wecom', 'webhook', 'smtp'].includes(args?.channel) ? String(args.channel) : ''
+          // local 也在白名单里：设置页「测试此通道」要能单独试本地弹窗，不然会被当成「全部通道」
+          const channel = ['wecom', 'webhook', 'smtp', 'local'].includes(args?.channel) ? String(args.channel) : ''
           const testConfigPath = `${state.pushConfigPath}.test`
 
           let outcome

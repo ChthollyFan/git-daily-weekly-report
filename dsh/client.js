@@ -140,7 +140,7 @@ window.__ModuleLoader__.load({
   white-space:pre-wrap; word-break:break-all; padding:9px 10px; border-radius:8px; max-height:240px;
   overflow:auto; border:1px solid var(--dsw-alias-border-l1,rgba(0,0,0,.1));
   background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.04)); }
-/* 通道卡片折叠：三个通道的字段加起来太长，收起后用标题行的摘要顶替 */
+/* 通道卡片折叠：四个通道的字段加起来太长，收起后用标题行的摘要顶替 */
 .gdr-card-fold { padding:0; overflow:hidden; }
 .gdr-card-head { display:flex; align-items:center; gap:8px; width:100%; box-sizing:border-box;
   padding:12px 15px; border:0; background:none; font-family:inherit; font-size:13px; font-weight:600;
@@ -452,7 +452,7 @@ window.__ModuleLoader__.load({
      * @param props.testing 该通道正在测试中
      * @param props.children 展开后的表单内容
      * @note 收起时不渲染 children：表单全是受控输入，重新展开会按草稿值重建不会丢数据，
-     *       但能省掉大量节点，也让三个通道能一屏看全
+     *       但能省掉大量节点，也让四个通道能一屏看全
      */
     function ChannelCard(props) {
       return h('section', { className: 'gdr-card gdr-card-fold' },
@@ -997,7 +997,9 @@ window.__ModuleLoader__.load({
      *       独立成页便于单独确认，也避免在写作规则页里误触测试发送
      */
     /** 通道的中文名，测试结果与摘要行都用这套叫法，避免前后不一 */
-    const CHANNEL_LABELS = { wecom: '企业微信', webhook: '自定义 Webhook', smtp: '邮件' }
+    const CHANNEL_LABELS = {
+      wecom: '企业微信', webhook: '自定义 Webhook', smtp: '邮件', local: '本地窗口推送',
+    }
 
     function PushPanel(props) {
       // 与「报告设置」一样：嵌入合并页时不重复渲染页头
@@ -1006,7 +1008,7 @@ window.__ModuleLoader__.load({
       const [draft, setDraft] = React.useState(null)
       const [busy, setBusy] = React.useState(false)
       const [status, setStatus] = React.useState({ kind: 'idle', text: '正在读取自动推送配置…' })
-      // 三个通道各自是否展开；null 表示还没从配置里推断过
+      // 四个通道各自是否展开；null 表示还没从配置里推断过
       const [expanded, setExpanded] = React.useState(null)
       const [testingChannel, setTestingChannel] = React.useState('')
       // 已创建的日报/周报定时任务，由 schedule-list 拉取
@@ -1020,8 +1022,8 @@ window.__ModuleLoader__.load({
       const adopt = React.useCallback((data) => {
         setSnapshot(data.snapshot)
         setDraft(clonePushConfig(data.snapshot.config))
-        // 三个通道一律默认收起：是否启用由标题右侧的状态标签体现，不再据配置自动展开
-        setExpanded((prev) => prev ?? { wecom: false, webhook: false, smtp: false })
+        // 四个通道一律默认收起：是否启用由标题右侧的状态标签体现，不再据配置自动展开
+        setExpanded((prev) => prev ?? { wecom: false, webhook: false, smtp: false, local: false })
         const notes = Array.isArray(data.snapshot.warnings) ? [...data.snapshot.warnings] : []
         // 这两项是「保存了也不会生效」的典型原因，载入时就摆出来，不等定时到点才暴露
         if (data.snapshot.scriptExists === false) notes.push('随包脚本 send_report.py 不存在，推送一定失败')
@@ -1170,6 +1172,10 @@ window.__ModuleLoader__.load({
         if (channelName === 'webhook') {
           if (!channels.webhook.enabled) return '未启用'
           return channels.webhook.url === '' ? '已启用 · 缺地址' : '已启用 · ' + channels.webhook.url
+        }
+        // 本地通道没有目标地址要校验，开关打开就能弹窗
+        if (channelName === 'local') {
+          return channels.local?.enabled === true ? '已启用 · 本机弹窗' : '未启用'
         }
         if (!channels.smtp.enabled) return '未启用'
         return channels.smtp.host === ''
@@ -1345,6 +1351,13 @@ window.__ModuleLoader__.load({
       const wecom = draft.channels.wecom
       const webhook = draft.channels.webhook
       const smtp = draft.channels.smtp
+      // 老配置里可能没有 local 段：渲染时按空对象兜底，保存时再由 host 侧补默认值
+      const local = draft.channels.local ?? {}
+      // local 段的写入统一走这里：先在草稿上补出对象，再交给字段回调改动
+      const patchLocal = (mutator) => patch((config) => {
+        config.channels.local = config.channels.local ?? {}
+        mutator(config.channels.local)
+      })
       // 官方调度是可选 bundle：快照里没有 schedule 段时一律按「未启用」呈现
       const schedule = snapshot.schedule ?? {}
       const carrierId = typeof schedule.session?.id === 'string' ? schedule.session.id : ''
@@ -1542,6 +1555,39 @@ window.__ModuleLoader__.load({
           h(NumberField, {
             label: '超时秒数', value: smtp.timeoutSeconds, min: 1, max: 120,
             onChange: (value) => patch((config) => { config.channels.smtp.timeoutSeconds = value }),
+          })),
+
+        // 本地窗口推送：不发任何网络请求，只把报告归档到本机再弹一个置顶小窗
+        h(ChannelCard, {
+          title: '本地窗口推送',
+          chip: channelChip('local'),
+          chipOn: local.enabled === true,
+          open: expanded !== null && expanded.local === true,
+          onToggle: (open) => toggleExpanded('local', open),
+          onTest: () => void testChannel('local'),
+          testing: testingChannel === 'local',
+        },
+          h(ToggleField, {
+            label: '启用', value: local.enabled === true,
+            onChange: (value) => patchLocal((item) => { item.enabled = value }),
+          }),
+          h(TextField, {
+            label: '通知标题模板', value: local.notifyTitleTemplate ?? '',
+            hint: '支持 {{title}} {{date}} 占位符，留空按「标题 - 日期」显示',
+            onChange: (value) => patchLocal((item) => { item.notifyTitleTemplate = value }),
+          }),
+          h(ToggleField, {
+            label: '正文里附带摘要', value: local.includeExcerpt !== false,
+            onChange: (value) => patchLocal((item) => { item.includeExcerpt = value }),
+          }),
+          h(ToggleField, {
+            label: '点「打开报告」用记事本打开', value: local.openOnClick !== false,
+            onChange: (value) => patchLocal((item) => { item.openOnClick = value }),
+          }),
+          h(NumberField, {
+            label: '自动关闭秒数', value: local.closeAfterSeconds ?? 15, min: 0, max: 600,
+            hint: '0 表示不自动关，等你自己点关闭；点开报告后也不再自动关',
+            onChange: (value) => patchLocal((item) => { item.closeAfterSeconds = value }),
           })),
 
         // 定时

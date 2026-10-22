@@ -10,6 +10,7 @@
 """
 
 import argparse
+import ctypes
 import datetime as dt
 import json
 import os
@@ -111,6 +112,15 @@ def default_config():
                 "html": False,
                 "timeoutSeconds": 20,
             },
+            # 本地通道：不发网络请求，只把报告归档到本机并弹窗提示
+            "local": {
+                "enabled": False,
+                "notifyTitleTemplate": "{{title}} - {{date}}",
+                "includeExcerpt": True,
+                "openOnClick": True,
+                # 提示窗自动关闭秒数，0 表示不自动关，等用户自己点
+                "closeAfterSeconds": 15,
+            },
         },
         "schedule": {
             "daily": {"enabled": False, "time": "18:00", "timeZone": "Asia/Shanghai"},
@@ -167,7 +177,8 @@ def merge_config(raw):
 
     channels = raw.get("channels")
     if isinstance(channels, dict):
-        for name in ("wecom", "webhook", "smtp"):
+        # local 与三个网络通道并列，同样做一层合并，缺字段沿用默认值
+        for name in ("wecom", "webhook", "smtp", "local"):
             section = channels.get(name)
             if isinstance(section, dict):
                 config["channels"][name].update(section)
@@ -604,17 +615,274 @@ def send_smtp(config, channel, content, report_type, report_date, dry_run):
     return {"name": "smtp", "ok": True, "recipients": len(recipients)}
 
 
+# 圆角靠色键抠出来：Tk 只能整窗透明或按色键透明，色键方案只抠掉四角，
+# 窗口主体仍然可点可拖；这个颜色必须挑界面上永远不会出现的值
+HOLE_COLOR = "#010203"
+ROUND_RADIUS = 36
+
+GA_ROOT = 2
+
+# 无边框窗口拖动：把客户区点击伪装成标题栏按下，交给系统搬窗口
+WM_NCLBUTTONDOWN = 0xA1
+HTCAPTION = 2
+
+
+def _round_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
+    """
+    @brief 在 Canvas 上画圆角矩形
+    @param canvas 目标画布
+    @param x1 左上角横坐标
+    @param y1 左上角纵坐标
+    @param x2 右下角横坐标
+    @param y2 右下角纵坐标
+    @param radius 圆角半径
+    @return 画布图元 id
+    @note 用平滑多边形近似圆弧，避免引入图像素材，抗锯齿效果也能接受
+    """
+    points = [
+        x1 + radius, y1, x2 - radius, y1, x2, y1, x2, y1 + radius,
+        x2, y2 - radius, x2, y2, x2 - radius, y2, x1 + radius, y2,
+        x1, y2, x1, y2 - radius, x1, y1 + radius, x1, y1,
+    ]
+    return canvas.create_polygon(points, smooth=True, **kwargs)
+
+
+def _launch_notepad(path):
+    """
+    @brief 用记事本打开报告文件
+    @param path 报告文件路径
+    @return 记事本是否成功启动
+    @note 走 ShellExecuteW 让资源管理器代为拉起：直接 subprocess 启动时记事本
+          会挂在当前进程的作业对象下，本进程一退出就被连带清理，表现成「点了
+          打开报告就闪退」；改用 shell 启动后进程归属 explorer，与本脚本解耦
+    """
+    try:
+        # 返回值大于 32 才算成功，小于等于 32 是 ShellExecute 的错误码
+        result = ctypes.windll.shell32.ShellExecuteW(None, "open", "notepad.exe", path, None, 1)
+        return int(result) > 32
+    except Exception:
+        return False
+
+
+def show_local_window(title, text, target_path, close_after):
+    """
+    @brief 用 tkinter 弹一个置顶小窗展示报告摘要
+    @param title 窗口标题
+    @param text 提示正文
+    @param target_path 点击「打开报告」时打开的文件路径，空串表示不显示按钮
+    @param close_after 自动关闭秒数，0 或负数表示不自动关闭
+    @return 窗口是否成功创建并显示
+    @note 不走 PowerShell 和 Windows 通知服务：本机应用控制策略会拦「从临时
+          目录执行 PowerShell 脚本」（WinError 786），托盘气泡在这台机器上也
+          一直没能真正显示，tkinter 是标准库且不需要 shell 宿主
+    @note 函数会阻塞到窗口关闭为止，调用方是命令行场景，由 close_after 兜底
+    """
+    try:
+        import tkinter as tk
+    except ImportError:
+        return False
+
+    try:
+        root = tk.Tk()
+    except Exception:
+        return False
+
+    background = "#151517"
+    root.title("报告已归档")
+    # 去掉系统标题栏：系统标题栏配这个深色底很割裂，改成自绘的同色标题栏
+    root.overrideredirect(True)
+    # 置顶：定时任务跑完时用户通常正在别的窗口里，不置顶就会被压在后面
+    try:
+        root.attributes("-topmost", True)
+    except Exception:
+        pass
+
+    width, height = 380, 176
+    pos_x = max(0, root.winfo_screenwidth() - width - 60)
+    pos_y = max(0, root.winfo_screenheight() - height - 140)
+    root.geometry("{}x{}+{}+{}".format(width, height, pos_x, pos_y))
+    root.update_idletasks()
+
+    # 圆角靠色键抠：画布上画一个圆角矩形填主题色，四角露出色键色，再由
+    # -transparentcolor 抠成透明。这样只有四角穿透，窗口主体照样可点可拖
+    backdrop = tk.Canvas(root, width=width, height=height, bg=HOLE_COLOR,
+                         highlightthickness=0, bd=0)
+    backdrop.place(x=0, y=0)
+    _round_rect(backdrop, 1, 1, width - 1, height - 1, ROUND_RADIUS,
+                fill=background, outline="#242427")
+    try:
+        root.wm_attributes("-transparentcolor", HOLE_COLOR)
+    except Exception:
+        pass
+    root.configure(bg=HOLE_COLOR)
+
+    def close():
+        root.destroy()
+
+    # 无边框窗口没有系统标题栏可拖：把点击转成系统的标题栏拖动消息，
+    # 由 Windows 接管拖拽，比在 Python 里手算坐标可靠（手算在部分缩放/DPI 下会漂）
+    def start_move(_event):
+        try:
+            hwnd = ctypes.windll.user32.GetAncestor(int(root.winfo_id()), GA_ROOT)
+            ctypes.windll.user32.ReleaseCapture()
+            ctypes.windll.user32.SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0)
+        except Exception:
+            pass
+
+    header = tk.Frame(root, bg=background)
+    header.pack(fill="x", padx=14, pady=(10, 2))
+    title_label = tk.Label(
+        header, text=title, font=("Microsoft YaHei UI", 11, "bold"),
+        fg="#ffffff", bg=background, anchor="w", justify="left",
+    )
+    title_label.pack(side="left")
+    close_label = tk.Label(
+        header, text="×", font=("Microsoft YaHei UI", 13),
+        fg="#81858c", bg=background, cursor="hand2",
+    )
+    close_label.pack(side="right")
+    close_label.bind("<Button-1>", lambda _event: close())
+    # 整个窗口都能拖：绑在顶层 tag 上，子控件未消费的事件会传上来；
+    # 按钮自己 bind 并返回 "break"，所以拖按钮不会带着窗口跑
+    root.bind("<Button-1>", start_move)
+
+    text_label = tk.Label(
+        root, text=text, font=("Microsoft YaHei UI", 9),
+        fg="#adb2b8", bg=background, anchor="nw", justify="left",
+        wraplength=width - 32,
+    )
+    text_label.pack(fill="both", expand=True, padx=16, pady=(2, 0))
+
+    open_button = None
+    # 自动关闭定时器句柄：点开报告后要取消它，否则窗口到点被收掉，
+    # 脚本一退出记事本又会被作业对象连带清理
+    close_timer = None
+
+    def open_report():
+        # 打开成功后刻意不销毁窗口：脚本一退出，dsh 的作业对象就会把同一作业里的
+        # 记事本一起清理（breakaway 与 WMI 启动都被拒绝访问），所以窗口留着提示，
+        # 由用户看完报告再手动关
+        nonlocal close_timer
+        if not target_path:
+            root.destroy()
+            return
+        if not _launch_notepad(target_path):
+            return
+        if close_timer is not None:
+            root.after_cancel(close_timer)
+            close_timer = None
+        title_label.config(text="报告已在记事本中打开")
+        text_label.config(text="看完报告后点「关闭」结束这个提示。")
+        if open_button is not None:
+            open_button.pack_forget()
+
+    bar = tk.Frame(root, bg=background)
+    bar.pack(fill="x", padx=16, pady=(4, 10))
+
+    def make_round_button(parent, label, command, fill, hover, width=92, height=28, radius=7):
+        # tk.Button 画不出圆角，改用 Canvas 自绘：底色与窗口同色，四角随窗口一起透明
+        canvas = tk.Canvas(
+            parent, width=width, height=height, bg=background,
+            highlightthickness=0, bd=0, cursor="hand2",
+        )
+        rect = _round_rect(canvas, 1, 1, width - 1, height - 1, radius, fill=fill, outline="")
+        canvas.create_text(width / 2, height / 2, text=label, fill="#ffffff",
+                           font=("Microsoft YaHei UI", 9))
+        canvas.bind("<Enter>", lambda _event: canvas.itemconfig(rect, fill=hover))
+        canvas.bind("<Leave>", lambda _event: canvas.itemconfig(rect, fill=fill))
+
+        def on_click(_event):
+            command()
+            # 返回 "break" 阻止事件继续传到顶层，否则点按钮会被当成拖窗口
+            return "break"
+
+        canvas.bind("<Button-1>", on_click)
+        return canvas
+
+    # 按钮色对齐 dsh 的深灰填充 rgb(44,44,46)，主次按钮同一底色
+    if target_path:
+        open_button = make_round_button(bar, "打开报告", open_report, "#2c2c2e", "#3a3a3d")
+        open_button.pack(side="right", padx=(8, 0))
+    make_round_button(bar, "关闭", close, "#2c2c2e", "#3a3a3d").pack(side="right")
+
+    if int(close_after) > 0:
+        close_timer = root.after(int(close_after) * 1000, close)
+
+    try:
+        root.mainloop()
+    except Exception:
+        return False
+    return True
+
+
+def send_local(channel, content, report_type, report_date, archived, dry_run):
+    """
+    @brief 本地通道：在桌面弹一个置顶小窗告知报告已归档
+    @param channel local 通道配置
+    @param content 正文
+    @param report_type daily 或 weekly
+    @param report_date 报告日期
+    @param archived 归档路径，None 表示本次没有写归档
+    @param dry_run 为真时只回显将要显示的内容
+    @return 统一结果字典，name 固定为 local
+    @note 只在本机登录桌面有效：服务或 Session 0 下建不出窗口，
+          这种情况必须返回失败，否则定时任务显示成功却没人看到报告
+    """
+    template = str(channel.get("notifyTitleTemplate") or "{{title}} - {{date}}")
+    title = (
+        template
+        .replace("{{title}}", REPORT_TITLES.get(report_type, "工作总结"))
+        .replace("{{date}}", report_date.isoformat())
+    )
+
+    lines = []
+    if archived:
+        lines.append("报告已存到 {}".format(archived))
+    else:
+        lines.append("报告已生成，但本次未写归档文件（--no-archive）")
+    if bool(channel.get("includeExcerpt", True)):
+        # 摘要只取首个非空行，小窗里放不下整篇正文
+        excerpt = first_non_empty_line(content)
+        if excerpt:
+            lines.append(excerpt[:80])
+    text = "\n".join(lines)
+
+    if dry_run:
+        # dry-run 也带上点击打开开关，方便确认配置是否生效
+        return {
+            "name": "local",
+            "ok": True,
+            "dryRun": True,
+            "title": title,
+            "text": text,
+            "clickToOpen": bool(archived) and bool(channel.get("openOnClick", True)),
+        }
+
+    if not sys.platform.startswith("win"):
+        return {"name": "local", "ok": False, "reason": "本地通道目前只支持 Windows 桌面"}
+
+    # 只有存在归档文件才值得挂点击：没有目标路径时点击也无处可去
+    clickable = bool(archived) and bool(channel.get("openOnClick", True))
+    # 自动关闭秒数防止窗口一直挂在屏幕上；0 表示不自动关闭，交给用户手动点
+    close_after = int(channel.get("closeAfterSeconds", 15) or 0)
+    shown = show_local_window(title, text, archived if clickable else "", close_after)
+    if not shown:
+        return {"name": "local", "ok": False, "reason": "无法创建本地提示窗口（缺少 tkinter 或当前没有可用桌面）"}
+    return {"name": "local", "ok": True, "title": title, "clickToOpen": clickable}
+
+
 def list_enabled_channels(config):
     """
     @brief 列出开关打开且关键字段已填的通道
     @param config 完整配置
-    @return 通道名列表，顺序固定为 wecom、webhook、smtp
+    @return 通道名列表，顺序固定为 wecom、webhook、smtp、local
     @note 与 dsh 侧的判断保持一致：半配置的通道不参与自动发送，免得必然失败
     """
     channels = config.get("channels") or {}
     wecom = channels.get("wecom") or {}
     webhook = channels.get("webhook") or {}
     smtp = channels.get("smtp") or {}
+    local = channels.get("local") or {}
 
     names = []
     if wecom.get("enabled") and str(wecom.get("webhookUrl") or "") != "":
@@ -623,10 +891,13 @@ def list_enabled_channels(config):
         names.append("webhook")
     if smtp.get("enabled") and str(smtp.get("host") or "") != "" and (smtp.get("to") or []):
         names.append("smtp")
+    # 本地通道没有目标地址要校验，开关打开即可用
+    if local.get("enabled"):
+        names.append("local")
     return names
 
 
-def archive_report(config, content, report_type, report_date, force, no_archive, dry_run):
+def archive_report(config, content, report_type, report_date, force, no_archive, dry_run, reuse_existing=False):
     """
     @brief 把正文归档为本地文件
     @param config 完整配置
@@ -636,9 +907,10 @@ def archive_report(config, content, report_type, report_date, force, no_archive,
     @param force 为真时覆盖同名归档
     @param no_archive 为真时跳过归档
     @param dry_run 为真时只算出目标路径不落盘
+    @param reuse_existing 为真时「同日已归档」不算冲突，直接复用已有文件路径
     @return (归档路径或 None, 冲突说明或 None)
-    @note 「同日已归档」算致命冲突（防止重复推送刷屏）；纯写入失败只打警告，
-          不影响推送本身
+    @note 「同日已归档」默认算致命冲突（防止重复推送刷屏）；只发本地通道时允许复用，
+          这样同一天反复验证本地通知不会被归档冲突挡住
     """
     if no_archive:
         return None, None
@@ -648,6 +920,8 @@ def archive_report(config, content, report_type, report_date, force, no_archive,
     target = directory / "{}-{}.md".format(report_date.strftime("%Y%m%d"), report_type)
 
     if target.exists() and not force:
+        if reuse_existing:
+            return str(target), None
         return None, "今天已推送过（{}），如需重发请加 --force".format(target)
 
     if dry_run:
@@ -704,7 +978,7 @@ def build_parser():
     parser.add_argument(
         "--channel",
         action="append",
-        choices=["wecom", "webhook", "smtp"],
+        choices=["wecom", "webhook", "smtp", "local"],
         default=None,
         help="只发指定通道，可重复；不传则发送所有已启用的通道",
     )
@@ -786,13 +1060,7 @@ def main():
             emit({"ok": False, "reason": "正文校验未通过：" + "；".join(errors), "type": report_type})
             return EXIT_CONFIG_OR_VALIDATION
 
-    archived, conflict = archive_report(
-        config, content, report_type, report_date, args.force, args.no_archive, args.dry_run,
-    )
-    if conflict is not None:
-        emit({"ok": False, "reason": conflict, "type": report_type, "date": report_date.isoformat()})
-        return EXIT_CONFIG_OR_VALIDATION
-
+    # 先定好要发哪些通道，归档那步才能知道要不要容忍「同日已归档」
     if args.channel:
         # 去重并保持命令行给出的顺序
         selected = []
@@ -801,6 +1069,15 @@ def main():
                 selected.append(name)
     else:
         selected = list_enabled_channels(config)
+
+    # 只发本地通道时允许复用当天已有归档：同一天反复验证气泡不该被归档冲突挡住
+    archived, conflict = archive_report(
+        config, content, report_type, report_date, args.force, args.no_archive, args.dry_run,
+        reuse_existing="local" in selected,
+    )
+    if conflict is not None:
+        emit({"ok": False, "reason": conflict, "type": report_type, "date": report_date.isoformat()})
+        return EXIT_CONFIG_OR_VALIDATION
 
     if not selected:
         emit({"ok": False, "reason": "没有任何已启用的推送通道，请先在设置页填好至少一个通道"})
@@ -814,6 +1091,8 @@ def main():
             result = send_wecom(channel, content, args.dry_run)
         elif name == "webhook":
             result = send_webhook(channel, content, report_type, report_date, args.dry_run)
+        elif name == "local":
+            result = send_local(channel, content, report_type, report_date, archived, args.dry_run)
         else:
             result = send_smtp(config, channel, content, report_type, report_date, args.dry_run)
         results.append(result)

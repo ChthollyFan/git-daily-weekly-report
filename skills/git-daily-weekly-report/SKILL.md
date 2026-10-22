@@ -53,9 +53,9 @@ description: 根据指定 Git 仓库的提交记录生成个人中文日报或�
     - 已启用时，把第 9 步生成的汇报正文原样写入一个临时文件（只放正文，不带任何前后说明），再执行 `python "<技能目录>/scripts/send_report.py" --type <daily|weekly> --file <临时文件>`。脚本会依次校验正文、归档、按已启用通道推送；正文也可改成 `--file -` 从标准输入读。
     - 脚本在 stdout 输出单行 JSON：`ok` 为 `true` 表示所有启用通道都发送成功；`ok` 为 `false` 时按顶层 `reason` 与 `channels[].reason` 说明哪一步失败。
     - 推送失败时仍然把正文照常输出给用户，并说明失败原因；不要把 webhook 地址、密码、授权码回显到对话里。
-    - 用户要求重发时加 `--force`；只想确认能不能发通时加 `--dry-run`（不发网络请求、不归档）；只想发某一条通道时加 `--channel wecom|webhook|smtp`，可重复。
+    - 用户要求重发时加 `--force`；只想确认能不能发通时加 `--dry-run`（不发网络请求、不归档）；只想发某一条通道时加 `--channel wecom|webhook|smtp|local`，可重复。
     - 脚本退出码：`0` 全部成功，`1` 有通道失败，`2` 正文校验未通过或今天已经推送过。
-    - 三个通道的字段含义、占位符与常见失败原因见 `references/push-config.md`。
+    - 四个通道（企业微信群机器人、自定义 Webhook、邮件 SMTP、本地窗口推送）的字段含义、占位符与常见失败原因见 `references/push-config.md`。
 
 ## 输出要求
 - 只输出汇报内容，即“今日工作总结”或“本周工作总结”的分点正文。

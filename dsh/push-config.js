@@ -107,6 +107,15 @@ export function createDefaultConfig() {
         html: false,
         timeoutSeconds: 20,
       },
+      // 本地通道：不发网络请求，只把报告归档到本机并弹窗提示
+      local: {
+        enabled: false,
+        notifyTitleTemplate: '{{title}} - {{date}}',
+        includeExcerpt: true,
+        openOnClick: true,
+        // 提示窗自动关闭秒数，0 表示不自动关，等用户自己点
+        closeAfterSeconds: 15,
+      },
     },
     schedule: {
       // 定时任务「有没有」由是否真的创建过任务决定，这里只存参数，不再有启用开关
@@ -418,6 +427,8 @@ export function normalizeConfig(raw) {
     normalizeWecom(channels.wecom, config.channels.wecom, warnings)
     normalizeWebhook(channels.webhook, config.channels.webhook, warnings)
     normalizeSmtp(channels.smtp, config.channels.smtp, warnings)
+    // 本地通道只做透传校验，不在这里丢字段，保住手工配置
+    normalizeLocal(channels.local, config.channels.local, warnings)
   }
 
   const schedule = raw.schedule
@@ -508,6 +519,28 @@ function normalizeSmtp(raw, target, warnings) {
 }
 
 /**
+ * @brief 规范化本地通知通道
+ * @param raw 该通道的原始对象
+ * @param target 待填充的默认对象
+ * @param warnings 收集降级说明的数组
+ * @note 这里必须有这条通道：否则设置页保存一次就会把手工写进配置的 local 段丢掉，
+ *       本地推送随之失效
+ */
+function normalizeLocal(raw, target, warnings) {
+  if (raw === null || raw === undefined || typeof raw !== 'object') return
+
+  target.enabled = coerceBool(raw.enabled, target.enabled, '本地通知开关', warnings)
+  const template = coerceText(raw.notifyTitleTemplate, target.notifyTitleTemplate, '本地通知标题模板', warnings)
+  target.notifyTitleTemplate = template === '' ? target.notifyTitleTemplate : template
+  target.includeExcerpt = coerceBool(raw.includeExcerpt, target.includeExcerpt, '本地通知摘要开关', warnings)
+  target.openOnClick = coerceBool(raw.openOnClick, target.openOnClick, '本地通知点击打开开关', warnings)
+  // 提示窗自动关闭秒数：0 表示不自动关，上限 10 分钟足够覆盖人工查看
+  target.closeAfterSeconds = coerceInt(
+    raw.closeAfterSeconds, 0, 600, target.closeAfterSeconds, '本地提示自动关闭秒数', warnings,
+  )
+}
+
+/**
  * @brief 规范化定时参数
  * @param raw schedule 段的原始对象
  * @param target 待填充的默认对象
@@ -546,17 +579,30 @@ function normalizeSchedule(raw, target, warnings) {
 }
 
 /**
+ * 通道在给人看的文案里的中文名
+ * @note 与 dsh/client.js 的 CHANNEL_LABELS 同一套叫法，避免指令里的通道名和设置页对不上
+ */
+const CHANNEL_LABELS = {
+  wecom: '企业微信',
+  webhook: '自定义 Webhook',
+  smtp: '邮件',
+  local: '本地窗口推送',
+}
+
+/**
  * @brief 列出配置齐全且已启用的通道名
  * @param config 已规范化的配置
- * @return 通道名数组，顺序固定为 wecom、webhook、smtp
+ * @return 通道名数组，顺序固定为 wecom、webhook、smtp、local
  * @note 只有开关打开**且**关键字段已填才算可用，否则脚本发给空目标必然失败
  */
 export function listEnabledChannels(config) {
   const names = []
-  const { wecom, webhook, smtp } = config.channels
+  const { wecom, webhook, smtp, local } = config.channels
   if (wecom.enabled && wecom.webhookUrl !== '') names.push('wecom')
   if (webhook.enabled && webhook.url !== '') names.push('webhook')
   if (smtp.enabled && smtp.host !== '' && smtp.to.length > 0) names.push('smtp')
+  // 本地通道没有目标地址要校验，开关打开即可用
+  if (local && local.enabled) names.push('local')
   return names
 }
 
@@ -642,7 +688,10 @@ export function typeFromPrompt(prompt) {
 export function buildTaskPrompt(config, type) {
   const repo = config.repo === '' ? '（未设置，需补全仓库路径）' : config.repo
   const channels = listEnabledChannels(config)
-  const channelText = channels.length === 0 ? '（未配置任何可用通道）' : channels.join('、')
+  // 指令是给人看的，通道名换成中文；与 dsh/client.js 的 CHANNEL_LABELS 保持同一套叫法
+  const channelText = channels.length === 0
+    ? '（未配置任何可用通道）'
+    : channels.map((name) => CHANNEL_LABELS[name] ?? name).join('、')
   const label = type === 'weekly' ? '周报' : '日报'
 
   return [
